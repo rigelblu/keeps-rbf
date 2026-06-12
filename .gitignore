@@ -1,0 +1,8 @@
+# build
+.build
+
+# rigelblu
+rb-drive
+.build/
+.swiftpm/
+.DS_Store
