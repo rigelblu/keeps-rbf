@@ -1,0 +1,11 @@
+# Use $REPO/docs/conventions/metadata.md
+[repo]
+product = "@stay-rbf"
+owner = "tom-rigelblu"
+workblock_prefixes = ['RBPS', 'RBHM', 'LUM', 'MGN', 'RB', 'MDT', 'SW', 'RBWP', 'TNGT', 'DATAOPS', 'DEVEXP', 'DEVOPS', 'INFOPS', 'PRTMOPS', 'SYSOPS', 'TFND', 'TDC', 'TDBLD', 'TGRW', 'TSUP', 'TOPS', 'TMNG', 'TINV', 'TPPL', 'NW']  # Array of workblock prefixes (e.g. ['PTH'])
+
+[project]
+type = "product"        # what this dir is: product | project
+product_id = ["stay"]  # short id prefix(es) this product ships, e.g. ["lum"]
+project_type = "new product"  # set by prj-setup at scaffold: new venture | new product | new features | ...
+rb_drive_store = "stay-rbf-drive"  # per-product dedicated store — payload at the store root; omit → shared default store namespaced by repo-relative path
