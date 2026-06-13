@@ -1,1 +1,4 @@
 .rb-drive
+.build/
+.swiftpm/
+.DS_Store
