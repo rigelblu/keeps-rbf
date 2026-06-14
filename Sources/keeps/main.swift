@@ -5,6 +5,7 @@
 //   --watch          Gate-1 probe: log each reconfig event + how many windows are readable RIGHT NOW
 // Automatic capture-on-event is intentionally NOT wired yet — it waits on Gate 1 (see Watcher).
 import AppKit
+import ApplicationServices  // AXIsProcessTrusted for the restore path
 import Core
 import CoreGraphics
 import os
@@ -12,9 +13,10 @@ import os
 let log = Logger(subsystem: "com.rigelblu.keeps", category: "main")
 let args = CommandLine.arguments
 
-func captureAndStore() throws -> (URL, Snapshot) {
-  let snap = Capture.snapshot()
-  return (try Store().save(snap), snap)
+func captureAndStore() throws -> (URL, Snapshot)? {
+  let result = Capture.capture()
+  guard !result.readFailed else { return nil }  // cid==0 — never persist a 0-window snapshot (M4)
+  return (try Store().save(result.snapshot), result.snapshot)
 }
 
 if args.contains("--print") {
@@ -27,6 +29,10 @@ if args.contains("--print") {
 
 if args.contains("--capture-once") {
   let result = Capture.capture()
+  guard !result.readFailed else {
+    print("SkyLight read failed (cid==0) — captured nothing, nothing saved")
+    exit(1)
+  }
   let snap = result.snapshot
   let url = try Store().save(snap)
   let attributed = snap.windows.filter { $0.desktopOrdinal != nil }.count
@@ -39,6 +45,44 @@ if args.contains("--capture-once") {
     .joined(separator: ", ")
   print("dropped \(result.drops.values.reduce(0, +)): [\(dropStr)]")
   print("fingerprint \(snap.configFingerprint) → \(url.path)")
+  exit(0)
+}
+
+if args.contains("--restore-once") {
+  // Read back the current config's snapshot and restore it. DRY RUN by default (moves nothing);
+  // pass --apply to actually place windows (Scenario B/C self-verify before the menu/auto path).
+  let apply = args.contains("--apply")
+  print(
+    "Accessibility: \(AXIsProcessTrusted() ? "trusted" : "NOT trusted — placed/reachable will be empty without it (System Settings → Privacy → Accessibility)")"
+  )
+  let fp = ConfigIdentity.fingerprint()
+  let snap: Snapshot
+  do {
+    snap = try Store().load(fingerprint: fp)
+  } catch {
+    print(
+      "no snapshot to restore for fp=\(fp): \(error.localizedDescription) — capture this config first (--capture-once)"
+    )
+    exit(1)
+  }
+  let r = Restore.restore(snap, apply: apply)
+  if r.readFailed {
+    print("SkyLight read failed (cid==0) — restored nothing")
+    exit(1)
+  }
+  let skipStr = r.skips.sorted { $0.value > $1.value }.map { "\($0.key.rawValue)=\($0.value)" }
+    .joined(separator: ", ")
+  print(
+    (apply
+      ? "restored \(r.applied)/\(r.planned) planned (\(r.failures) failed)"
+      : "DRY RUN — would restore \(r.planned)")
+      + " of \(snap.windows.count) captured windows, fp=\(fp)")
+  print("skipped \(r.skips.values.reduce(0, +)): [\(skipStr)]")
+  if args.contains("--verbose") {
+    for o in r.outcomes.sorted(by: { $0.action < $1.action }) {
+      print("  [\(o.action)] \(o.bundleId) — \(o.title ?? "(no title)")  wid=\(o.cgWindowId)")
+    }
+  }
   exit(0)
 }
 
@@ -75,16 +119,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   var statusItem: NSStatusItem!
   var statusLine: NSMenuItem!  // glanceable "last capture" line so you can SEE it's working
   var watcher: Watcher?  // held so the CG reconfig registration survives
-  var captureDebounce: Timer?  // coalesces the reconfig event burst into one capture once it settles
+  var settleDebounce: Timer?  // coalesces the reconfig burst into one settle action once it's quiet
+  var lastSettled: String?  // the config we last acted on — guards the sleep/wake spurious restore (#keeps-3)
 
   func applicationDidFinishLaunching(_ note: Notification) {
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     statusItem.button?.title = "▢"  // placeholder glyph; the real icon is packaging (deferred)
     let menu = NSMenu()
-    statusLine = NSMenuItem(title: "No capture yet", action: nil, keyEquivalent: "")
-    statusLine.isEnabled = false  // info-only; shows what the last capture did
+    statusLine = NSMenuItem(title: "No activity yet", action: nil, keyEquivalent: "")
+    statusLine.isEnabled = false  // info-only; shows what the last capture/restore did
     menu.addItem(statusLine)
     menu.addItem(.separator())
+    let restoreItem = NSMenuItem(
+      title: "Restore Workspace Layout", action: #selector(restore), keyEquivalent: "r")
+    restoreItem.target = self
+    menu.addItem(restoreItem)
     let saveItem = NSMenuItem(
       title: "Save Workspace Layout", action: #selector(save), keyEquivalent: "s")
     saveItem.target = self
@@ -94,20 +143,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     statusItem.menu = menu
 
-    // Automatic capture (Gate 1 resolved 2026-06-13): the CG reconfig event fires reliably in-app, so it
-    // TRIGGERS a debounced capture of the now-settled config. capture-on-leave is dead — at the begin
-    // callback the fingerprint has already flipped to the new config — so we instead keep each config's
-    // snapshot fresh while we're stably in it (keyed by its fingerprint); the config you leave already has
-    // one. Manual "Save Workspace Layout" stays as the on-demand refresh. The Watcher only forwards events;
-    // the debounce + capture policy lives here in the host.
-    watcher = Watcher { [weak self] _, _ in self?.scheduleCapture(reason: "reconfig") }
+    // Arbitration (#keeps-3): the CG reconfig event is BOTH capture's and restore's trigger, so on a settled
+    // config-change we RESTORE a config we've seen before and CAPTURE (learn) one we haven't — never capture a
+    // known config on its entry event (that would overwrite its good snapshot with the just-disrupted layout
+    // and corrupt the entries #keeps-4 needs). Launch is NOT a "came back" moment, so it only captures-if-unknown
+    // (never auto-restores). The Watcher just forwards; the policy lives here.
+    watcher = Watcher { [weak self] _, _ in
+      self?.debounceSettle { self?.onSettle(reason: "reconfig") }
+    }
     watcher?.start()
-    scheduleCapture(reason: "launch")  // seed the config we launched into, once it settles
+    let launchUUIDs = ConfigIdentity.activeDisplayUUIDs()
+    lastSettled = launchUUIDs.isEmpty ? nil : ConfigIdentity.fingerprint(of: launchUUIDs)  // baseline for the no-change guard
+    if launchUUIDs.isEmpty {
+      log.info("launch: no active displays — observing")
+    } else if Store().exists(fingerprint: ConfigIdentity.fingerprint(of: launchUUIDs)) {
+      log.info(
+        "launch: known config — observing (manual Restore available; no auto-restore on launch)")
+    } else {
+      debounceSettle { [weak self] in self?.autoCapture(reason: "launch") }  // unknown — seed it once it settles
+    }
   }
 
   @objc func save() {
     do {
-      let (url, snap) = try captureAndStore()
+      guard let (url, snap) = try captureAndStore() else {
+        log.error("manual save: SkyLight read failed (cid==0), skipped")
+        tick("⚠")
+        return
+      }
       log.info("manual save: \(snap.windows.count) windows → \(url.path)")
       noteCapture(snap, "manual")
       tick("✓")
@@ -117,18 +180,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
-  // The reconfig burst (begin/end × per-display) fires within ~1s; each event resets this timer so we
-  // capture once, after the configuration has gone quiet and settled.
-  private func scheduleCapture(reason: String) {
-    captureDebounce?.invalidate()
-    captureDebounce = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
-      self?.autoCapture(reason: reason)
+  // Coalesce the reconfig burst (begin/end × per-display, ~1s) into a single action once it goes quiet.
+  private func debounceSettle(_ action: @escaping () -> Void) {
+    settleDebounce?.invalidate()
+    settleDebounce = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { _ in action() }
+  }
+
+  // A settled config-change: RESTORE a config we've seen, CAPTURE (learn) one we haven't — never both, so a
+  // known config's good snapshot is never overwritten on its entry (#keeps-3 arbitration).
+  private func onSettle(reason: String) {
+    let uuids = ConfigIdentity.activeDisplayUUIDs()
+    let fp = ConfigIdentity.fingerprint(of: uuids)
+    // Don't fight the user on a non-change: a display SLEEP empties the display list (degenerate config), and
+    // sleep/wake re-fires the reconfig with the SAME fingerprint — neither is a real config change (dogfeel
+    // 2026-06-14). Only a genuine move to a different config restores (known) or learns (unknown).
+    switch SettlePolicy.decide(
+      fingerprint: fp, degenerate: uuids.isEmpty,
+      lastSettled: lastSettled, known: Store().exists(fingerprint: fp))
+    {
+    case .restore:
+      lastSettled = fp
+      performRestore(reason: reason)
+    case .capture:
+      lastSettled = fp
+      autoCapture(reason: reason)
+    case .skipNoChange:
+      log.info(
+        "settle (\(reason, privacy: .public)): same config [\(fp, privacy: .public)] — skip (sleep/wake guard)"
+      )
+    case .skipNoDisplays:
+      log.info("settle (\(reason, privacy: .public)): no active displays — skip")
     }
   }
 
-  private func autoCapture(reason: String) {
+  @objc func restore() { performRestore(reason: "manual") }
+
+  private func performRestore(reason: String) {
+    let store = Store()
+    let fp = ConfigIdentity.fingerprint()
+    guard store.exists(fingerprint: fp) else {
+      statusLine.title = "No saved layout for this config yet — Save it first"
+      tick("⚠")
+      return
+    }
+    guard ensureAccessibility() else { return }  // lazy prompt + Needs-Accessibility state; no-op until granted
     do {
-      let (_, snap) = try captureAndStore()
+      let r = Restore.restore(try store.load(fingerprint: fp), apply: true)
+      guard !r.readFailed else {
+        log.error("restore (\(reason, privacy: .public)): SkyLight read failed (cid==0)")
+        tick("⚠")
+        return
+      }
+      log.info(
+        "restore (\(reason, privacy: .public)): placed \(r.applied)/\(r.planned), deferred \(r.deferredBackground), fp=\(fp, privacy: .public)"
+      )
+      noteRestore(r, reason)
+      tick("⟳")
+    } catch {
+      log.error("restore (\(reason, privacy: .public)) failed: \(error.localizedDescription)")
+      statusLine.title = "Restore failed: \(error.localizedDescription)"
+      tick("⚠")
+    }
+  }
+
+  // Restore needs Accessibility (capture didn't). Lazy: prompt on first need, show a Needs-Accessibility state,
+  // and no-op until granted — never a silent do-nothing.
+  private func ensureAccessibility() -> Bool {
+    if AXIsProcessTrusted() { return true }
+    // kAXTrustedCheckOptionPrompt is imported inconsistently across SDKs (CFString vs Unmanaged); its value is
+    // the stable string "AXTrustedCheckOptionPrompt", so use that directly to dodge the import ambiguity.
+    _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
+    statusLine.title = "Needs Accessibility — grant it in System Settings, then Restore again"
+    statusItem.button?.title = "!"
+    return false
+  }
+
+  private func autoCapture(reason: String) {
+    guard !ConfigIdentity.activeDisplayUUIDs().isEmpty else {  // displays asleep ⇒ nothing real to learn (no 0-display snapshot)
+      log.info("auto-capture (\(reason, privacy: .public)): no active displays — skipped")
+      return
+    }
+    do {
+      guard let (_, snap) = try captureAndStore() else {
+        log.error(
+          "auto-capture (\(reason, privacy: .public)): SkyLight read failed (cid==0), skipped")
+        tick("⚠")
+        return
+      }
       log.info(
         "auto-capture (\(reason, privacy: .public)): \(snap.windows.count) windows, fp=\(snap.configFingerprint, privacy: .public)"
       )
@@ -146,6 +284,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     f.dateFormat = "HH:mm:ss"
     statusLine.title =
       "Last: \(snap.windows.count) windows · \(snap.configFingerprint.prefix(8)) · \(f.string(from: Date())) · \(kind)"
+  }
+
+  private func noteRestore(_ r: Restore.Result, _ kind: String) {
+    let f = DateFormatter()
+    f.dateFormat = "HH:mm:ss"
+    statusLine.title =
+      "Restored \(r.applied) · deferred \(r.deferredBackground) · \(ConfigIdentity.fingerprint().prefix(8)) · \(f.string(from: Date())) · \(kind)"
   }
 
   private func tick(_ glyph: String) {
