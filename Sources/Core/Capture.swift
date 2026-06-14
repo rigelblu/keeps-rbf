@@ -68,18 +68,30 @@ public enum Capture {
   public struct Result {
     public let snapshot: Snapshot
     public let drops: [DropReason: Int]  // counts by reason — Scenario A: every drop accounted for
+    // An ENUMERATION failed rather than honestly returning nothing — do NOT persist (M4). Three ways in:
+    // cid == 0 (SkyLight didn't load), unresolved space symbols, or a NULL window list. All three make a busy
+    // desktop read as empty, and the sweep then drops every window "correctly", producing a valid-looking
+    // empty snapshot. The last two were silent until the #keeps-2 review (2026-07-27) widened this flag.
+    public let readFailed: Bool
   }
 
   public static func capture() -> Result {
     let cid = cgsMainConnection()
+    guard cid != 0, cgsSpaceLookupAvailable else {  // DO-NOT-PERSIST result (M4): a 0-window
+      // snapshot must never overwrite a good one (e.g. a first-encounter capture under a failed read).
+      let empty = Snapshot(
+        schema: captureSchema, capturedAt: Date(),
+        configFingerprint: ConfigIdentity.fingerprint(), displays: [], windows: [])
+      return Result(snapshot: empty, drops: [:], readFailed: true)
+    }
     let spaceIndex = buildSpaceIndex(cid)
     let regularPIDs = regularAppPIDs()
 
     var windows: [CapturedWindow] = []
     var drops: [DropReason: Int] = [:]
-    for info in (CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]])
-      ?? []
-    {
+    // NULL here is a read failure, not an empty desktop — hoisted so the verdict below can tell them apart.
+    let windowList = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]
+    for info in windowList ?? [] {
       let pid = info[kCGWindowOwnerPID as String] as? pid_t ?? -1
       let bundleId = regularPIDs[pid]
       let layer = info[kCGWindowLayer as String] as? Int ?? -1
@@ -100,7 +112,7 @@ public enum Capture {
       schema: captureSchema, capturedAt: Date(),
       configFingerprint: ConfigIdentity.fingerprint(),
       displays: displaySummaries(cid), windows: windows)
-    return Result(snapshot: snapshot, drops: drops)
+    return Result(snapshot: snapshot, drops: drops, readFailed: windowList == nil)
   }
 
   /// Convenience for callers that only want the layout (the menu Save path).
