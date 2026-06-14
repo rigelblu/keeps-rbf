@@ -19,6 +19,25 @@ func captureAndStore() throws -> (URL, Snapshot)? {
   return (try Store().save(result.snapshot), result.snapshot)
 }
 
+// Run the async carry to completion synchronously for the CLI path (the menu drives it as a Task instead, so its
+// ~1.1s/step waits never freeze the UI). The carry yields on its own executor; main just blocks until it's done.
+// Live progress goes to stderr so it doesn't tangle with the summary on stdout.
+func runCarry(_ snapshot: Snapshot, apply: Bool) -> Carry.CarryResult {
+  let sem = DispatchSemaphore(value: 0)
+  var result: Carry.CarryResult!
+  Task.detached {
+    result = await Carry.carry(snapshot, apply: apply) { p in
+      guard apply else { return }
+      FileHandle.standardError.write(
+        "  carrying \(p.done)/\(p.total) · desktop \(p.toDesktop) · \(p.bundleId)\n".data(
+          using: .utf8)!)
+    }
+    sem.signal()
+  }
+  sem.wait()
+  return result
+}
+
 if args.contains("--print") {
   let enc = JSONEncoder()
   enc.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -86,6 +105,56 @@ if args.contains("--restore-once") {
   exit(0)
 }
 
+if args.contains("--carry-once") {
+  // Carry this config's deferred-background windows back to their captured desktops + frames (#keeps-4, the
+  // VISIBLE half). DRY RUN by default — re-classifies, plans, and lists each window's target, moving nothing;
+  // pass --apply to run the visible carry. --verbose prints the per-window decision. Note: unlike --restore-once
+  // (genuinely side-effect-free), the dry-run validates the PLAN, not the mechanism — whether a held window
+  // follows is only provable live (Scenario D2/D3 + G2). Move the mouse mid-run to abort an --apply carry.
+  let apply = args.contains("--apply")
+  print(
+    "Accessibility: \(AXIsProcessTrusted() ? "trusted" : "NOT trusted — the carry's synthetic input is ignored without it (System Settings → Privacy → Accessibility)")"
+  )
+  let fp = ConfigIdentity.fingerprint()
+  let snap: Snapshot
+  do {
+    snap = try Store().load(fingerprint: fp)
+  } catch {
+    print(
+      "no snapshot to carry for fp=\(fp): \(error.localizedDescription) — capture this config first (--capture-once)"
+    )
+    exit(1)
+  }
+  let r = runCarry(snap, apply: apply)
+  if r.readFailed {
+    print("SkyLight read failed (cid==0) — carried nothing")
+    exit(1)
+  }
+  if r.navigationDead {
+    print(
+      "Can't navigate desktops — enable Switch-to-Desktop or Move-a-space (System Settings → Keyboard → Shortcuts → Mission Control)"
+    )
+    exit(1)
+  }
+  let skipStr = r.skips.sorted { $0.value > $1.value }.map { "\($0.key.rawValue)=\($0.value)" }
+    .joined(separator: ", ")
+  print(
+    (apply
+      ? "carried \(r.carried)/\(r.plannedCarries)\(r.aborted ? " (aborted after \(r.abortedAfter))" : "")"
+      : "DRY RUN — would carry \(r.plannedCarries)")
+      + " of \(snap.windows.count) captured windows, fp=\(fp)")
+  print("skipped \(r.skipped): [\(skipStr)]")
+  if args.contains("--verbose") {
+    for o in r.outcomes.sorted(by: { $0.outcome < $1.outcome }) {
+      let leg = (o.fromGlobal.map(String.init) ?? "?") + "→" + (o.toGlobal.map(String.init) ?? "?")
+      print(
+        "  [\(o.outcome)] \(o.bundleId) — \(o.title ?? "(no title)")  desktop \(leg)  wid=\(o.cgWindowId)"
+      )
+    }
+  }
+  exit(0)
+}
+
 if args.contains("--watch") {
   setvbuf(stdout, nil, _IOLBF, 0)  // line-buffer: non-TTY stdout block-buffers, hiding live events
   // Gate-1 probe — on each reconfig event, log flags + how many windows are readable NOW.
@@ -134,6 +203,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       title: "Restore Workspace Layout", action: #selector(restore), keyEquivalent: "r")
     restoreItem.target = self
     menu.addItem(restoreItem)
+    let carryItem = NSMenuItem(
+      title: "Restore Desktops", action: #selector(restoreDesktops), keyEquivalent: "d")
+    carryItem.target = self
+    menu.addItem(carryItem)
     let saveItem = NSMenuItem(
       title: "Save Workspace Layout", action: #selector(save), keyEquivalent: "s")
     saveItem.target = self
@@ -241,6 +314,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       statusLine.title = "Restore failed: \(error.localizedDescription)"
       tick("⚠")
     }
+  }
+
+  // The deliberate VISIBLE carry (#keeps-4): carry this config's deferred-background windows back to their
+  // captured desktops. Drives macOS's own ⌥⌘N / ⌃→ shortcuts (takes over the cursor, flips desktops), so it
+  // runs OFF the main actor in a Task — its ~1.1s/step waits yield, keeping the menu live and the cursor-drift
+  // abort responsive (move the mouse to stop it). UI updates hop back to main.
+  @objc func restoreDesktops() {
+    guard ensureAccessibility() else { return }  // the carry's synthetic input needs the same trust restore does
+    let store = Store()
+    let fp = ConfigIdentity.fingerprint()
+    guard store.exists(fingerprint: fp), let snap = try? store.load(fingerprint: fp) else {
+      statusLine.title = "No saved layout for this config yet — Save it first"
+      tick("⚠")
+      return
+    }
+    statusLine.title = "Carrying desktops… (move the mouse to stop)"
+    statusItem.button?.title = "⟳"
+    Task { @MainActor in
+      let r = await Carry.carry(snap, apply: true) { p in
+        DispatchQueue.main.async {
+          self.statusLine.title = "Carrying \(p.done)/\(p.total) · desktop \(p.toDesktop)…"
+        }
+      }
+      self.finishCarry(r, fp: fp)  // resumes on the main actor after the carry completes
+    }
+  }
+
+  private func finishCarry(_ r: Carry.CarryResult, fp: String) {
+    if r.readFailed {
+      log.error("carry: SkyLight read failed (cid==0)")
+      statusLine.title = "Carry failed — SkyLight read"
+      tick("⚠")
+      return
+    }
+    if r.navigationDead {
+      statusLine.title = "Can't navigate desktops — enable Switch-to-Desktop shortcuts"
+      tick("⚠")
+      return
+    }
+    log.info(
+      "carry: carried \(r.carried)/\(r.plannedCarries), skipped \(r.skipped), aborted=\(r.aborted), fp=\(fp, privacy: .public)"
+    )
+    let f = DateFormatter()
+    f.dateFormat = "HH:mm:ss"
+    let abortNote = r.aborted ? " · aborted@\(r.abortedAfter)" : ""
+    statusLine.title =
+      "Carried \(r.carried)/\(r.plannedCarries) · skipped \(r.skipped)\(abortNote) · \(f.string(from: Date()))"
+    tick(r.aborted ? "⚠" : "⟳")
   }
 
   // Restore needs Accessibility (capture didn't). Lazy: prompt on first need, show a Needs-Accessibility state,

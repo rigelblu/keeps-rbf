@@ -55,6 +55,69 @@ public func cgsSpacesForWindow(_ cid: CGSConnectionID, _ windowID: CGWindowID) -
   return (f(cid, 0x7, wins)?.takeRetainedValue() as? [Int]) ?? []
 }
 
+// MARK: - Synthetic input (the VISIBLE carry — #keeps-4). These are PUBLIC CoreGraphics CGEvent calls, not
+// private CGS — but they're quarantined here with the other fragile, OS-coupled mechanism: the navigation +
+// title-bar drag is the single thing a macOS release is most likely to break, so it sits in the swappable seam,
+// never in Core's pure plan. All visible + cursor-hijacking — only ever called from the deliberate carry sweep.
+
+/// Post a key chord (down then up) with EXACT flags — fired verbatim from a read symbolichotkeys binding so it
+/// carries the Fn flag (arrow keys need it) and any custom modifiers. Hardcoding the mods dropped Fn and silently
+/// no-op'd the step (caught 3× across the spikes). The 40ms down→up gap is the synthetic-event settle.
+public func postKeyChord(_ keyCode: CGKeyCode, flags: CGEventFlags) {
+  let src = CGEventSource(stateID: .hidSystemState)
+  let down = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: true)
+  down?.flags = flags
+  down?.post(tap: .cghidEventTap)
+  usleep(40_000)
+  let up = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: false)
+  up?.flags = flags
+  up?.post(tap: .cghidEventTap)
+}
+
+/// Move the hardware cursor (no buttons) — used to park the cursor on a display before stepping, and to set the
+/// known point the drift-abort measures against.
+public func moveCursor(to p: CGPoint) {
+  CGEvent(
+    mouseEventSource: CGEventSource(stateID: .hidSystemState), mouseType: .mouseMoved,
+    mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+}
+
+/// Begin a title-bar grab: mouse-down then a small drag to actually START a window drag (a bare mouse-down isn't a
+/// drag). The held window then follows desktop switches (proven D2/D3). Returns the parked drag point.
+@discardableResult
+public func beginWindowGrab(at p: CGPoint) -> CGPoint {
+  let src = CGEventSource(stateID: .hidSystemState)
+  CGEvent(
+    mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: p, mouseButton: .left)?
+    .post(tap: .cghidEventTap)
+  usleep(150_000)
+  let dragged = CGPoint(x: p.x + 8, y: p.y + 8)
+  CGEvent(
+    mouseEventSource: src, mouseType: .leftMouseDragged, mouseCursorPosition: dragged,
+    mouseButton: .left)?.post(tap: .cghidEventTap)
+  usleep(200_000)
+  return dragged
+}
+
+/// Continue the held drag to a new point (nudged each step so the OS keeps the window held across the switch).
+public func dragHeldWindow(to p: CGPoint) {
+  CGEvent(
+    mouseEventSource: CGEventSource(stateID: .hidSystemState), mouseType: .leftMouseDragged,
+    mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+}
+
+/// Release the synthetic drag (leftMouseUp). MUST run on every carry exit path (`defer`) so a crash / early-return
+/// / abort never leaves the mouse button stuck down — the carry's floor "never trap the machine" guarantee.
+public func endWindowGrab(at p: CGPoint) {
+  CGEvent(
+    mouseEventSource: CGEventSource(stateID: .hidSystemState), mouseType: .leftMouseUp,
+    mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+}
+
+/// The current hardware cursor location — the carry parks the cursor at a known point each step, so a drift from
+/// it means the user physically moved the mouse ⇒ abort. Mouse-abort needs no event-tap (proven D3).
+public func cursorLocation() -> CGPoint? { CGEvent(source: nil)?.location }
+
 // MARK: - AX → CGWindowID bridge (private _AXUIElementGetWindow; SIP-on; ported from #keeps-1/6 SpikeShared)
 private typealias AXGetWindowFn = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) ->
   AXError
