@@ -68,10 +68,18 @@ public enum Capture {
   public struct Result {
     public let snapshot: Snapshot
     public let drops: [DropReason: Int]  // counts by reason — Scenario A: every drop accounted for
+    public let readFailed: Bool  // cid == 0 — SkyLight read failed; snapshot is empty, do NOT persist (M4)
   }
 
   public static func capture() -> Result {
     let cid = cgsMainConnection()
+    guard cid != 0 else {  // SkyLight load failed — return an empty, DO-NOT-PERSIST result (M4): a 0-window
+      // snapshot must never overwrite a good one (e.g. a first-encounter capture under a failed read).
+      let empty = Snapshot(
+        schema: captureSchema, capturedAt: Date(),
+        configFingerprint: ConfigIdentity.fingerprint(), displays: [], windows: [])
+      return Result(snapshot: empty, drops: [:], readFailed: true)
+    }
     let spaceIndex = buildSpaceIndex(cid)
     let regularPIDs = regularAppPIDs()
 
@@ -100,7 +108,7 @@ public enum Capture {
       schema: captureSchema, capturedAt: Date(),
       configFingerprint: ConfigIdentity.fingerprint(),
       displays: displaySummaries(cid), windows: windows)
-    return Result(snapshot: snapshot, drops: drops)
+    return Result(snapshot: snapshot, drops: drops, readFailed: false)
   }
 
   /// Convenience for callers that only want the layout (the menu Save path).
