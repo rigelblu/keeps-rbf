@@ -7,9 +7,10 @@ A modern replacement for [Stay](https://cordlessdog.com/keeps/) (unmaintained si
 docking/undocking scatters windows onto the wrong displays and desktops, and re-placing ~17 windows by
 hand is enough friction to keep you chained to the desk.
 
-> **Status: early, in active development.** The layout **capture** engine works and is unit-tested;
-> **restore** is the next slice. Solo-dogfooded on the author's machine — not yet something to rely on.
-> See [Status / roadmap](#status--roadmap).
+> **Status: early, in active development.** Layout **capture** and **silent restore of the windows on
+> your current desktop** both work — unit-tested and dogfooded. Bringing back windows on your *other*
+> desktops (Spaces) is the next slice. Solo-dogfooded on the author's machine — not yet something to
+> rely on. See [Status / roadmap](#status--roadmap).
 
 ## The honest macOS constraint (the interesting part)
 
@@ -36,8 +37,11 @@ daily-drivable first slice.
 - ✅ **Capture** — records every window across every desktop via private `CGWindowListCopyWindowInfo`
   (not Accessibility — AX can't see background desktops), keyed per monitor configuration; menu-bar
   **Save Workspace Layout**; unit-tested
-- ⏳ **Restore — display + position + size** — silent; the daily-drivable slice
-- ⏳ **Restore — virtual desktop** — the visible ritual; the full hypothesis
+- ✅ **Restore — display + position + size (current desktop)** — silent, automatic on a setup change,
+  via public Accessibility; the daily-drivable slice. **Scope:** the windows on the desktop you're
+  looking at — windows on *other* desktops (Spaces) aren't restored yet (Accessibility can't reach them)
+- ⏳ **Restore — other desktops (Spaces)** — a visible carry to bring back the windows not on your
+  current desktop, so the whole layout returns; the full hypothesis
 - ⏳ **Triggers + reliability** — dock/undock/wake, ≥95% of windows within ~5s
 
 ## Build & run
@@ -46,13 +50,17 @@ Requires **macOS 14+** (developed on macOS 26) and **Swift 6**.
 
 ```sh
 swift build
-./.build/debug/keeps --capture-once   # snapshot the current layout, print a summary
-./.build/debug/keeps --print          # dump the snapshot JSON to stdout
-./.build/debug/keeps                   # run the menu-bar app: "Save Workspace Layout"
+./.build/debug/keeps --capture-once          # snapshot the current layout, print a summary
+./.build/debug/keeps --restore-once          # dry-run: print what restore would do (moves nothing)
+./.build/debug/keeps --restore-once --apply  # restore the current setup's layout for real
+./.build/debug/keeps --print                 # dump the snapshot JSON to stdout
+./.build/debug/keeps                          # run the menu-bar app: Save / Restore Workspace Layout
 ```
 
 Snapshots are written one-per-setup to `~/Library/Application Support/com.rigelblu.keeps/configs/`.
-Capture needs no special permission; window *titles* require Screen Recording (optional).
+Capture needs no special permission; window *titles* require Screen Recording (optional). **Restore**
+moves windows via Accessibility, so the app must be **Accessibility-trusted** (System Settings → Privacy
+& Security → Accessibility) — it prompts on first restore and no-ops until granted.
 
 ## Principles
 

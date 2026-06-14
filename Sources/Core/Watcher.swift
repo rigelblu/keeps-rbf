@@ -10,18 +10,28 @@ import os
 public final class Watcher {
   private let log = Logger(subsystem: "com.rigelblu.keeps", category: "Watcher")
   private let handler: (CGDisplayChangeSummaryFlags, CGDirectDisplayID) -> Void
+  private var registered = false
+
+  // No captures ⇒ a clean @convention(c) function pointer, reusable for BOTH register and remove
+  // (CGDisplayRemoveReconfigurationCallback requires the SAME callback + context that was registered).
+  private let callback: CGDisplayReconfigurationCallBack = { display, flags, ctx in
+    guard let ctx else { return }
+    Unmanaged<Watcher>.fromOpaque(ctx).takeUnretainedValue().handler(flags, display)
+  }
 
   public init(_ handler: @escaping (CGDisplayChangeSummaryFlags, CGDirectDisplayID) -> Void) {
     self.handler = handler
   }
 
   public func start() {
-    let ctx = Unmanaged.passUnretained(self).toOpaque()
     let err = CGDisplayRegisterReconfigurationCallback(
-      { display, flags, ctx in
-        guard let ctx else { return }
-        Unmanaged<Watcher>.fromOpaque(ctx).takeUnretainedValue().handler(flags, display)
-      }, ctx)
-    log.info("watcher registered (err=\(err.rawValue), automatic trigger Gate-1-pending)")
+      callback, Unmanaged.passUnretained(self).toOpaque())
+    registered = (err == .success)
+    log.info("watcher registered (err=\(err.rawValue))")
+  }
+
+  deinit {
+    guard registered else { return }
+    CGDisplayRemoveReconfigurationCallback(callback, Unmanaged.passUnretained(self).toOpaque())
   }
 }
