@@ -63,6 +63,40 @@ public enum Restore {
     return .place(cap.frame)
   }
 
+  // MARK: - Shared classification seam (#keeps-4)
+  // The carry can't consume a cached `Result` — it exposes only a deferred *count* (`Outcome` drops
+  // spaceUUID/frame), and a deliberate carry fired later than any auto-restore must act on *current* live
+  // state. So both `Restore.restore` and `Carry` gather live window state ONCE and run the same per-window
+  // `decide` over it; the carry then keeps the `.deferredBackground` `CapturedWindow`s (which carry the
+  // spaceUUID + frame it needs). Shared logic, computed fresh — the adversarial-review Blocker-1 fix.
+
+  /// Live window state gathered once for a classification pass: the CGS connection, the AX active-desktop
+  /// reachable set, and the CGWindowList(.optionAll) existence/frames. `nil` ⇒ SkyLight read failed (cid == 0).
+  struct LiveState {
+    let cid: CGSConnectionID
+    let reachable: [CGWindowID: Reachable]
+    let existence: Existence
+  }
+
+  /// Read the live window state `decide` classifies against. One AX sweep + one CGWindowList read; `nil` on a
+  /// failed SkyLight load (cid == 0) so callers can surface `readFailed` instead of acting on nothing (M4).
+  static func gatherLiveState() -> LiveState? {
+    let cid = cgsMainConnection()
+    guard cid != 0 else { return nil }
+    return LiveState(cid: cid, reachable: reachableWindows(), existence: enumerateExistence())
+  }
+
+  /// Classify every captured window against live state — each paired with its `Action`. The seam #keeps-4's
+  /// carry re-runs at trigger time, then filters for `.skip(.deferredBackground)` to get its carry set.
+  static func classify(_ snapshot: Snapshot, against live: LiveState, tolerance: Int = 2) -> [(
+    CapturedWindow, Action
+  )] {
+    snapshot.windows.map { cap in
+      let match = matchFor(cap, cid: live.cid, reachable: live.reachable, existence: live.existence)
+      return (cap, decide(cap, match: match, tolerance: tolerance))
+    }
+  }
+
   // MARK: - I/O sweep
 
   public struct Result {
@@ -89,27 +123,21 @@ public enum Restore {
   /// is a DRY RUN — it plans and counts but moves nothing (the safe default). Only windows reachable on an
   /// active desktop are placed; background-desktop matches are counted `deferredBackground` for #keeps-4.
   public static func restore(_ snapshot: Snapshot, apply: Bool, tolerance: Int = 2) -> Result {
-    let cid = cgsMainConnection()
-    guard cid != 0 else {  // SkyLight load failed → can't read spaces → act on nothing (M4)
+    guard let live = gatherLiveState() else {  // SkyLight load failed → act on nothing (M4)
       return Result(
         planned: 0, applied: 0, failures: 0, skips: [:], outcomes: [], dryRun: !apply,
         readFailed: true)
     }
-    let reachable = reachableWindows()
-    let existence = enumerateExistence()
-
     var planned = 0
     var applied = 0
     var failures = 0
     var skips: [SkipReason: Int] = [:]
     var outcomes: [Outcome] = []
-    for cap in snapshot.windows {
-      let match = matchFor(cap, cid: cid, reachable: reachable, existence: existence)
-      let action = decide(cap, match: match, tolerance: tolerance)
+    for (cap, action) in classify(snapshot, against: live, tolerance: tolerance) {
       switch action {
       case .place(let frame):
         planned += 1
-        if apply, let el = reachable[cap.cgWindowId]?.element {  // dry run, or lost the element, ⇒ count only
+        if apply, let el = live.reachable[cap.cgWindowId]?.element {  // dry run, or lost the element, ⇒ count only
           if setFrame(el, frame) { applied += 1 } else { failures += 1 }
         }
       case .skip(let reason):
@@ -127,11 +155,11 @@ public enum Restore {
 
   // MARK: - I/O helpers
 
-  private struct Reachable {
+  struct Reachable {
     let element: AXUIElement
     let minimized: Bool
-  }
-  private struct Existence {
+  }  // internal: held by LiveState (#keeps-4 seam)
+  struct Existence {
     let ids: Set<CGWindowID>
     let frames: [CGWindowID: WindowFrame]
   }
@@ -194,8 +222,9 @@ public enum Restore {
   /// AX size→pos→size — defeats apps that move-on-resize and constraints that drop a lone trailing size-set
   /// (the #keeps-6 Endel finding). "Different display" needs no special step: it's the captured global coords.
   /// Returns whether the position landed (the load-bearing display+position; size is best-effort).
+  /// Internal (not private) so #keeps-4's carry reuses the exact same placement after it lands a window.
   @discardableResult
-  private static func setFrame(_ el: AXUIElement, _ f: WindowFrame) -> Bool {
+  static func setFrame(_ el: AXUIElement, _ f: WindowFrame) -> Bool {
     var size = CGSize(width: f.w, height: f.h)
     var pos = CGPoint(x: f.x, y: f.y)
     guard let sizeV = AXValueCreate(.cgSize, &size), let posV = AXValueCreate(.cgPoint, &pos) else {
