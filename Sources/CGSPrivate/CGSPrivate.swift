@@ -1,4 +1,4 @@
-import ApplicationServices  // AXUIElement / AXError for the AX→CGWindowID bridge
+import ApplicationServices  // AXUIElement / AXError for the AX-to-WindowID bridge
 import CoreGraphics
 // CGSPrivate — every private SkyLight/CGS call behind a typed seam. The ONE place macOS-version
 // fragility lives (port of the proven #keeps-1/#keeps-6 SpikeShared wrappers; dlopen-before-dlsym).
@@ -35,9 +35,7 @@ public func cgsMainConnection() -> CGSConnectionID {
 }
 
 // MARK: - Spaces (read-only; proven SIP-on in #keeps-1)
-private typealias CopyManagedDisplaySpacesFn = @convention(c) (CGSConnectionID) -> Unmanaged<
-  CFArray
->?
+private typealias CopyManagedDisplaySpacesFn = @convention(c) (CGSConnectionID) -> Unmanaged<CFArray>?
 /// Per-display managed spaces: each element has "Display Identifier", "Current Space", "Spaces".
 public func cgsManagedDisplaySpaces(_ cid: CGSConnectionID) -> [[String: Any]] {
   guard let p = Priv.sym("CGSCopyManagedDisplaySpaces") else { return [] }
@@ -45,8 +43,7 @@ public func cgsManagedDisplaySpaces(_ cid: CGSConnectionID) -> [[String: Any]] {
   return (f(cid)?.takeRetainedValue() as? [[String: Any]]) ?? []
 }
 
-private typealias CopySpacesForWindowsFn = @convention(c) (CGSConnectionID, Int32, CFArray) ->
-  Unmanaged<CFArray>?
+private typealias CopySpacesForWindowsFn = @convention(c) (CGSConnectionID, Int32, CFArray) -> Unmanaged<CFArray>?
 /// Managed space ids a window belongs to. Mask 0x7 = all space types. count != 1 ⇒ sticky/unattributable.
 public func cgsSpacesForWindow(_ cid: CGSConnectionID, _ windowID: CGWindowID) -> [Int] {
   guard let p = Priv.sym("CGSCopySpacesForWindows") else { return [] }
@@ -55,14 +52,28 @@ public func cgsSpacesForWindow(_ cid: CGSConnectionID, _ windowID: CGWindowID) -
   return (f(cid, 0x7, wins)?.takeRetainedValue() as? [Int]) ?? []
 }
 
-// MARK: - Synthetic input (the VISIBLE carry — #keeps-4). These are PUBLIC CoreGraphics CGEvent calls, not
+// MARK: - Synthetic input (the VISIBLE carry — #keeps-12). These are PUBLIC CoreGraphics CGEvent calls, not
 // private CGS — but they're quarantined here with the other fragile, OS-coupled mechanism: the navigation +
-// title-bar drag is the single thing a macOS release is most likely to break, so it sits in the swappable seam,
+// title-bar hold/carry is the single thing a macOS release is most likely to break, so it sits in the swappable seam,
 // never in Core's pure plan. All visible + cursor-hijacking — only ever called from the deliberate carry sweep.
 
+private func hidMouseSource() -> CGEventSource? {
+  let src = CGEventSource(stateID: .hidSystemState)
+  src?.setLocalEventsFilterDuringSuppressionState([], state: .eventSuppressionStateSuppressionInterval)
+  return src
+}
+
+private func postMouse(_ type: CGEventType, at p: CGPoint, source: CGEventSource?) {
+  let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: p, mouseButton: .left)
+  event?.flags = []
+  event?.setIntegerValueField(.mouseEventClickState, value: 1)
+  event?.post(tap: .cghidEventTap)
+}
+
 /// Post a key chord (down then up) with EXACT flags — fired verbatim from a read symbolichotkeys binding so it
-/// carries the Fn flag (arrow keys need it) and any custom modifiers. Hardcoding the mods dropped Fn and silently
-/// no-op'd the step (caught 3× across the spikes). The 40ms down→up gap is the synthetic-event settle.
+/// carries macOS's stored secondary-Fn bit for arrow bindings and any custom modifiers. Hardcoding the user-visible
+/// Control+Arrow shape dropped that stored bit and silently no-op'd the step. The 40ms down→up gap is the
+/// synthetic-event settle.
 public func postKeyChord(_ keyCode: CGKeyCode, flags: CGEventFlags) {
   let src = CGEventSource(stateID: .hidSystemState)
   let down = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: true)
@@ -77,41 +88,31 @@ public func postKeyChord(_ keyCode: CGKeyCode, flags: CGEventFlags) {
 /// Move the hardware cursor (no buttons) — used to park the cursor on a display before stepping, and to set the
 /// known point the drift-abort measures against.
 public func moveCursor(to p: CGPoint) {
-  CGEvent(
-    mouseEventSource: CGEventSource(stateID: .hidSystemState), mouseType: .mouseMoved,
-    mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+  postMouse(.mouseMoved, at: p, source: hidMouseSource())
 }
 
-/// Begin a title-bar grab: mouse-down then a small drag to actually START a window drag (a bare mouse-down isn't a
-/// drag). The held window then follows desktop switches (proven D2/D3). Returns the parked drag point.
+/// Begin a title-bar hold: mouse-down on a known draggable point, with no pre-drag. Tom's #keeps-12 manual check
+/// proved a plain hold plus the real Space shortcut carries the window; membership verification is the proof.
+/// Returns the parked hold point.
 @discardableResult
 public func beginWindowGrab(at p: CGPoint) -> CGPoint {
-  let src = CGEventSource(stateID: .hidSystemState)
-  CGEvent(
-    mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: p, mouseButton: .left)?
-    .post(tap: .cghidEventTap)
-  usleep(150_000)
-  let dragged = CGPoint(x: p.x + 8, y: p.y + 8)
-  CGEvent(
-    mouseEventSource: src, mouseType: .leftMouseDragged, mouseCursorPosition: dragged,
-    mouseButton: .left)?.post(tap: .cghidEventTap)
-  usleep(200_000)
-  return dragged
+  let src = hidMouseSource()
+  postMouse(.mouseMoved, at: p, source: src)
+  usleep(80_000)
+  postMouse(.leftMouseDown, at: p, source: src)
+  usleep(180_000)
+  return p
 }
 
-/// Continue the held drag to a new point (nudged each step so the OS keeps the window held across the switch).
+/// Continue a held drag to a new point. Kept as an explicit fallback seam; the default #keeps-12 path is hold-only.
 public func dragHeldWindow(to p: CGPoint) {
-  CGEvent(
-    mouseEventSource: CGEventSource(stateID: .hidSystemState), mouseType: .leftMouseDragged,
-    mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+  postMouse(.leftMouseDragged, at: p, source: hidMouseSource())
 }
 
 /// Release the synthetic drag (leftMouseUp). MUST run on every carry exit path (`defer`) so a crash / early-return
 /// / abort never leaves the mouse button stuck down — the carry's floor "never trap the machine" guarantee.
 public func endWindowGrab(at p: CGPoint) {
-  CGEvent(
-    mouseEventSource: CGEventSource(stateID: .hidSystemState), mouseType: .leftMouseUp,
-    mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+  postMouse(.leftMouseUp, at: p, source: hidMouseSource())
 }
 
 /// The current hardware cursor location — the carry parks the cursor at a known point each step, so a drift from
@@ -119,8 +120,7 @@ public func endWindowGrab(at p: CGPoint) {
 public func cursorLocation() -> CGPoint? { CGEvent(source: nil)?.location }
 
 // MARK: - AX → CGWindowID bridge (private _AXUIElementGetWindow; SIP-on; ported from #keeps-1/6 SpikeShared)
-private typealias AXGetWindowFn = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) ->
-  AXError
+private typealias AXGetWindowFn = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
 /// Turn an AXUIElement into its CGWindowID — the keystone that lets #keeps-3 restore key a live AX window by
 /// the same `cgWindowId` capture recorded. nil if the private symbol is unresolved or the call errors.
 public func axWindowID(_ element: AXUIElement) -> CGWindowID? {

@@ -1,25 +1,25 @@
-// Scenario C made executable — decode com.apple.symbolichotkeys into replayable bindings. The Fn flag on the
-// arrow-key bindings is the bug class this slice caught THREE times (a synthetic ⌃→ without Fn silently no-ops),
-// so it's pinned red-on-regression. The modifier mask maps 1:1 onto CGEventFlags, which is what lets a decoded
-// binding fire verbatim and carry Fn + custom rebinds for free. Pure decode — fed plist-shaped fixtures.
+// Scenario C made executable — decode com.apple.symbolichotkeys into replayable bindings. macOS stores the
+// UI-visible ⌃→ arrow-key bindings with the secondary-Fn bit; dropping that bit silently no-ops, so it's pinned
+// red-on-regression. The modifier mask maps 1:1 onto CGEventFlags, which is what lets a decoded binding fire
+// verbatim and carry stored/custom modifiers. Pure decode — fed plist-shaped fixtures.
 import Testing
 import CoreGraphics
 @testable import Core
 
 @Suite struct ShortcutsTests {
     // symbolichotkeys entry shape: { enabled, value: { type, parameters: [char, keycode, modifierMask] } }.
-    // Masks from the live machine: 8650752 = ⌃(0x40000)+Fn(0x800000); 1572864 = ⌥(0x80000)+⌘(0x100000).
+    // Masks from the live machine: 8650752 = ⌃(0x40000)+secondary-Fn(0x800000); 1572864 = ⌥(0x80000)+⌘(0x100000).
     private func entry(_ keycode: Int, _ mask: Int, enabled: Bool) -> [String: Any] {
         ["enabled": enabled, "value": ["type": "standard", "parameters": [65, keycode, mask]]]
     }
     private func hotkeys() -> [String: Any] {
-        ["81": entry(124, 8650752, enabled: true),    // Move right a space — ⌃→ (with Fn)
+        ["81": entry(124, 8650752, enabled: true),    // Move right a space — UI shows ⌃→
          "79": entry(123, 8650752, enabled: true),    // Move left a space  — ⌃←
          "118": entry(18, 1572864, enabled: true),    // Switch to Desktop 1 — ⌥⌘1 (id 117+1)
          "128": entry(29, 1572864, enabled: false)]   // Switch to Desktop 11 — present but DISABLED (id 117+11)
     }
 
-    @Test func decodesMoveRightCarryingFnFlag() {   // THE bug class — Fn must survive the decode
+    @Test func decodesMoveRightCarryingSecondaryFnFlag() {   // THE bug class — stored bit must survive decode
         let s = Shortcuts.decode(hotkeys())
         #expect(s.moveRight?.keyCode == 124)
         #expect(s.moveRight?.flags.contains(.maskSecondaryFn) == true)
@@ -28,7 +28,7 @@ import CoreGraphics
         #expect(s.moveLeft?.keyCode == 123)
     }
 
-    @Test func decodesSwitchToDesktopModifiers() {   // ⌥⌘1 — command + option, no Fn
+    @Test func decodesSwitchToDesktopModifiers() {   // ⌥⌘1 — command + option, no secondary-Fn
         let s = Shortcuts.decode(hotkeys())
         #expect(s.switchToDesktop[1]?.keyCode == 18)
         #expect(s.switchToDesktop[1]?.flags.contains(.maskCommand) == true)
