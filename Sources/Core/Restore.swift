@@ -8,7 +8,7 @@ import CoreGraphics
 // and every skip is counted with a reason — never a silent miss (the #keeps-2 Scenario-A discipline).
 //
 // The silent/active-desktop boundary falls out of AX for free: AX (kAXWindows) only reaches the ACTIVE
-// desktop, so a captured window with no AX match is either on a BACKGROUND desktop (→ #keeps-4's visible
+// desktop, so a captured window with no AX match is either on a BACKGROUND desktop (→ #keeps-12's visible
 // ⌥⌘N carry) or GONE — and CGWindowList(.optionAll) + cgsSpacesForWindow tell those apart. Raw .optionAll
 // membership is NOT the discriminator: it includes 0-space minimized/junk windows (#keeps-2,
 // agents-core-memories), so a since-minimized window must be classified `minimized`, never mislabeled
@@ -24,7 +24,7 @@ public enum Restore {
     case sticky  // flagged all-desktops AND not reachable — can't frame-restore (reachable ones ARE placed)
     case gone  // no live window matches — closed since capture
     case minimized  // matched but minimized / 0-space — can't place; un-minimize is out of scope
-    case deferredBackground  // matched, on a BACKGROUND desktop — silent AX can't reach it → #keeps-4
+    case deferredBackground  // matched, on a BACKGROUND desktop — silent AX can't reach it → #keeps-12
     case alreadyCorrect  // live frame already matches the captured frame (±tolerance) — no-op
   }
 
@@ -53,9 +53,9 @@ public enum Restore {
   static func decide(_ cap: CapturedWindow, match: Match?, tolerance: Int = 2) -> Action {
     guard let m = match else { return .skip(.gone) }  // no live window in .optionAll at all
     if m.minimized || m.liveSpaceCount == 0 { return .skip(.minimized) }  // 0-space = minimized/junk, NOT background (M1)
-    guard m.reachable else { return .skip(cap.sticky ? .sticky : .deferredBackground) }  // can't reach: #keeps-4, or all-spaces we can't touch
+    guard m.reachable else { return .skip(cap.sticky ? .sticky : .deferredBackground) }  // can't reach: #keeps-12, or all-spaces we can't touch
     // Reachable on an active desktop → frame-restore (display + position + size). The `sticky` flag gates only
-    // desktop-CARRY (#keeps-4), never frame-restore — and it's unreliable anyway (cgsSpacesForWindow over-reports
+    // desktop-CARRY (#keeps-12), never frame-restore — and it's unreliable anyway (cgsSpacesForWindow over-reports
     // Safari/others as all-spaces, #keeps-6), so it must not block placing a window we CAN reach. (dogfeel 2026-06-13)
     if let lf = m.liveFrame, cap.frame.matches(lf, tolerance: tolerance) {
       return .skip(.alreadyCorrect)
@@ -63,7 +63,7 @@ public enum Restore {
     return .place(cap.frame)
   }
 
-  // MARK: - Shared classification seam (#keeps-4)
+  // MARK: - Shared classification seam (#keeps-12)
   // The carry can't consume a cached `Result` — it exposes only a deferred *count* (`Outcome` drops
   // spaceUUID/frame), and a deliberate carry fired later than any auto-restore must act on *current* live
   // state. So both `Restore.restore` and `Carry` gather live window state ONCE and run the same per-window
@@ -86,7 +86,7 @@ public enum Restore {
     return LiveState(cid: cid, reachable: reachableWindows(), existence: enumerateExistence())
   }
 
-  /// Classify every captured window against live state — each paired with its `Action`. The seam #keeps-4's
+  /// Classify every captured window against live state — each paired with its `Action`. The seam #keeps-12's
   /// carry re-runs at trigger time, then filters for `.skip(.deferredBackground)` to get its carry set.
   static func classify(_ snapshot: Snapshot, against live: LiveState, tolerance: Int = 2) -> [(
     CapturedWindow, Action
@@ -107,7 +107,7 @@ public enum Restore {
     public let outcomes: [Outcome]  // per-window decision — every captured window, inspectable
     public let dryRun: Bool
     public let readFailed: Bool  // cid == 0 — SkyLight read failed; nothing read or done (M4)
-    public var deferredBackground: Int { skips[.deferredBackground] ?? 0 }  // the #keeps-4 handoff size
+    public var deferredBackground: Int { skips[.deferredBackground] ?? 0 }  // the #keeps-12 handoff size
   }
 
   /// One captured window's restore decision — for the verbose log + future menu detail. `action` is "place"
@@ -121,7 +121,7 @@ public enum Restore {
 
   /// Read back `snapshot` and place each captured window where it was, via public AX (silent). `apply == false`
   /// is a DRY RUN — it plans and counts but moves nothing (the safe default). Only windows reachable on an
-  /// active desktop are placed; background-desktop matches are counted `deferredBackground` for #keeps-4.
+  /// active desktop are placed; background-desktop matches are counted `deferredBackground` for #keeps-12.
   public static func restore(_ snapshot: Snapshot, apply: Bool, tolerance: Int = 2) -> Result {
     guard let live = gatherLiveState() else {  // SkyLight load failed → act on nothing (M4)
       return Result(
@@ -158,7 +158,7 @@ public enum Restore {
   struct Reachable {
     let element: AXUIElement
     let minimized: Bool
-  }  // internal: held by LiveState (#keeps-4 seam)
+  }  // internal: held by LiveState (#keeps-12 seam)
   struct Existence {
     let ids: Set<CGWindowID>
     let frames: [CGWindowID: WindowFrame]
@@ -222,7 +222,7 @@ public enum Restore {
   /// AX size→pos→size — defeats apps that move-on-resize and constraints that drop a lone trailing size-set
   /// (the #keeps-6 Endel finding). "Different display" needs no special step: it's the captured global coords.
   /// Returns whether the position landed (the load-bearing display+position; size is best-effort).
-  /// Internal (not private) so #keeps-4's carry reuses the exact same placement after it lands a window.
+  /// Internal (not private) so #keeps-12's carry reuses the exact same placement after it lands a window.
   @discardableResult
   static func setFrame(_ el: AXUIElement, _ f: WindowFrame) -> Bool {
     var size = CGSize(width: f.w, height: f.h)
