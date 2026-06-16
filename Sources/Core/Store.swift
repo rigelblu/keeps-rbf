@@ -8,6 +8,10 @@ public struct Store {
   public init(directory: URL? = nil) {
     if let directory {
       self.directory = directory
+    } else if let override = ProcessInfo.processInfo.environment["KEEPS_STORE_DIR"],
+      !override.isEmpty
+    {
+      self.directory = URL(fileURLWithPath: override, isDirectory: true)
     } else {
       let appSupport = FileManager.default.urls(
         for: .applicationSupportDirectory, in: .userDomainMask)[0]

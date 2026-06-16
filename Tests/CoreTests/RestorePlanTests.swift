@@ -52,7 +52,7 @@ import Testing
       Restore.decide(cap(), match: match(reachable: false, spaceCount: 0)) == .skip(.minimized))
   }
 
-  @Test func defersBackgroundDesktopWindow() {  // matched, 1 space, not active → #keeps-4's input
+  @Test func defersBackgroundDesktopWindow() {  // matched, 1 space, not active → #keeps-12's input
     #expect(
       Restore.decide(cap(), match: match(reachable: false, spaceCount: 1))
         == .skip(.deferredBackground))

@@ -1,8 +1,8 @@
 // Shortcuts — the user's ACTUAL Mission-Control key bindings, read from com.apple.symbolichotkeys and replayed
-// verbatim. NOT hardcoded: the spikes caught the same bug three times — a synthetic ⌃→ without the Function-key
-// flag (0x800000) that arrow keys carry intrinsically silently no-ops, while ⌥⌘<digit> (no Fn) fires fine. The
-// symbolichotkeys modifier mask maps 1:1 onto CGEventFlags (⇧0x20000 ⌃0x40000 ⌥0x80000 ⌘0x100000 Fn0x800000),
-// so a decoded binding fires AS-IS and carries Fn, the user's custom rebinds, and the enabled bit for free.
+// verbatim. NOT hardcoded: the spikes caught the same bug three times — the UI-visible ⌃→ shortcut is stored with
+// macOS's secondary-Fn bit (0x800000), and dropping that bit silently no-ops while ⌥⌘<digit> fires fine. The
+// symbolichotkeys modifier mask maps 1:1 onto CGEventFlags (⇧0x20000 ⌃0x40000 ⌥0x80000 ⌘0x100000 secondary-Fn
+// 0x800000), so a decoded binding fires AS-IS and carries stored modifiers, custom rebinds, and the enabled bit.
 //
 // Entry ids (com.apple.symbolichotkeys → AppleSymbolicHotKeys): Switch-to-Desktop N is 117+N (118=desktop 1 …
 // 127=desktop 10, 128+=11–16, usually disabled); Move-left/right-a-space are 79 / 81. Each entry is
@@ -13,7 +13,7 @@ import CoreGraphics
 
 public struct Shortcuts: Equatable {
 
-    /// A replayable key chord — fired verbatim (keycode + the stored modifier flags, Fn included).
+    /// A replayable key chord — fired verbatim (keycode + the stored modifier flags).
     public struct Binding: Equatable {
         public let keyCode: CGKeyCode
         public let flags: CGEventFlags
@@ -59,7 +59,7 @@ extension Shortcuts {
                   let value = entry["value"] as? [String: Any],
                   let params = value["parameters"] as? [Any], params.count >= 3,
                   let keyCode = intValue(params[1]), let mask = intValue(params[2]) else { return nil }
-            // The mask maps 1:1 onto CGEventFlags — fire it verbatim (this is what carries Fn / custom mods).
+            // The mask maps 1:1 onto CGEventFlags — fire it verbatim (this carries stored/custom modifiers).
             return Binding(keyCode: CGKeyCode(keyCode), flags: CGEventFlags(rawValue: UInt64(mask)),
                            isEnabled: boolValue(entry["enabled"]))
         }
