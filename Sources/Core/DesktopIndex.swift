@@ -1,10 +1,10 @@
 import CGSPrivate
-// DesktopIndex — the live desktop topology turned into the lookups #keeps-4's carry navigates by. Two identities
+// DesktopIndex — the live desktop topology turned into the lookups #keeps-12's carry navigates by. Two identities
 // flow through the carry and they are NOT the same number:
 //   • the captured `spaceUUID` (a stable uuid, the restore anchor) names the TARGET desktop,
 //   • `cgsSpacesForWindow` returns int `ManagedSpaceID`s naming a window's CURRENT desktop.
 // Both must resolve to the same coordinate to compare: the 1-based GLOBAL ⌥⌘N ordinal = Σ(preceding displays'
-// desktop counts) + the space's per-display index. That global numbering is #keeps-4's keystone and the fix to the
+// desktop counts) + the space's per-display index. That global numbering is #keeps-12's keystone and the fix to the
 // seed's bug — the per-display index == the ⌥⌘N number only on the FIRST display; on later displays they diverge
 // by the offset (display 1's 5th desktop is global 17, not 5). The probe proved ⌥⌘N is global, so this ordinal
 // IS the navigation target. Pure (built from a parsed read) so Scenario B unit-tests the cross-display case.
