@@ -26,10 +26,17 @@ public enum Restore {
     case minimized  // matched but minimized / 0-space — can't place; un-minimize is out of scope
     case deferredBackground  // matched, on a BACKGROUND desktop — silent AX can't reach it → #keeps-12
     case alreadyCorrect  // live frame already matches the captured frame (±tolerance) — no-op
+    // #keeps-17: the Space-safety guard. `deferred*` = the carry owns it now; the other two are count-only.
+    case deferredCrossDisplay  // placing would cross displays onto a Space that isn't the window's captured one
+    case offScreenTarget  // the desired frame resolves to no live display — placing lands unpredictably (#keeps-15 owns the repair)
+    case unprovableSpace  // cross-display but no captured spaceUUID — can't prove Space safety, and the carry has no target
   }
 
   enum Action: Equatable {
-    case place(WindowFrame)  // set the window to this captured frame (display + position + size)
+    // set the window to this captured frame (display + position + size). `verifySpace` is the #keeps-17
+    // enforcement order: a cross-display place re-homes the window, so the sweep must read membership after
+    // the AX-set and restitute if it didn't land on the window's own Space (sticky/same-display never verify).
+    case place(WindowFrame, verifySpace: Bool)
     case skip(SkipReason)
     var label: String {
       switch self {
@@ -46,6 +53,10 @@ public enum Restore {
     var minimized: Bool  // AX kAXMinimized — a minimized window can still appear in AX
     var liveSpaceCount: Int  // cgsSpacesForWindow count: 0 ⇒ minimized/junk, 1 ⇒ one desktop, >1 ⇒ all-desktops
     var liveFrame: WindowFrame?  // current frame from CGWindowList bounds (same source as capture)
+    // #keeps-17 guard facts, resolved against LIVE geometry (matchFor computes them; tests set them directly).
+    var currentDisplay: String? = nil  // live display under the window's current frame center (nil ⇒ unknown)
+    var landingDisplay: String? = nil  // live display under the DESIRED frame center — where an AX-set would actually land; nil ⇒ off-screen
+    var landingActiveSpace: String? = nil  // the landing display's active Space uuid (nil ⇒ unknown — treated as unprovable)
   }
 
   /// The restore filter, as one pure function. Order matters: cheapest/most-decisive rejects first.
@@ -60,7 +71,18 @@ public enum Restore {
     if let lf = m.liveFrame, cap.frame.matches(lf, tolerance: tolerance) {
       return .skip(.alreadyCorrect)
     }
-    return .place(cap.frame)
+    // #keeps-17: a silent place must never change the window's Space. Placing at coords no live display owns
+    // lands wherever macOS clamps it — refuse (the repair is #keeps-15's display-relative model, not ours).
+    guard let landing = m.landingDisplay else { return .skip(.offScreenTarget) }
+    // Crossing displays re-homes the window onto the landing display's ACTIVE Space (the 2026-06-16 lever) —
+    // allowed only when that active Space IS the window's own captured Space, and verified after the set.
+    // Sticky (all-desktops) membership can't be damaged, so sticky windows place unguarded, unverified.
+    if !cap.sticky, m.currentDisplay == nil || m.currentDisplay != landing {
+      guard let home = cap.spaceUUID else { return .skip(.unprovableSpace) }
+      guard m.landingActiveSpace == home else { return .skip(.deferredCrossDisplay) }
+      return .place(cap.frame, verifySpace: true)
+    }
+    return .place(cap.frame, verifySpace: false)
   }
 
   // MARK: - Shared classification seam (#keeps-12)
@@ -76,14 +98,57 @@ public enum Restore {
     let cid: CGSConnectionID
     let reachable: [CGWindowID: Reachable]
     let existence: Existence
+    let desktopIndex: DesktopIndex  // #keeps-17: managedID→uuid for verify-after-place
+    let topology: Topology  // #keeps-17: the guard's landing-display + active-Space facts
   }
 
-  /// Read the live window state `decide` classifies against. One AX sweep + one CGWindowList read; `nil` on a
-  /// failed SkyLight load (cid == 0) so callers can surface `readFailed` instead of acting on nothing (M4).
+  /// The live display topology the #keeps-17 guard classifies against: each display's bounds (which display
+  /// a frame would actually land on — the same center rule the trace's `displayOf` uses) and its active Space
+  /// uuid (the Space a cross-display AX move re-homes onto). Pure once built; one I/O read per sweep.
+  struct Topology: Equatable {
+    struct Display: Equatable {
+      let uuid: String
+      let bounds: CGRect
+      let activeSpaceUUID: String?  // nil ⇒ unknown — decide treats a cross-display landing there as unprovable
+    }
+    let displays: [Display]
+
+    /// The display whose bounds contain the frame's center; nil ⇒ no live display owns it (an off-screen target).
+    func displayContaining(_ f: WindowFrame) -> Display? {
+      let c = CGPoint(x: Double(f.x) + Double(f.w) / 2, y: Double(f.y) + Double(f.h) / 2)
+      return displays.first { $0.bounds.contains(c) }
+    }
+
+    /// Read the live topology: CG display bounds joined to the CGS per-display active Space by display UUID
+    /// (CGS "Display Identifier" == the CFUUID string ConfigIdentity derives — the same join `Carry`'s
+    /// `displayID(forIdentifier:)` relies on).
+    static func live(index: DesktopIndex) -> Topology {
+      var count: UInt32 = 0
+      CGGetActiveDisplayList(0, nil, &count)
+      var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+      CGGetActiveDisplayList(count, &ids, &count)
+      let displays: [Display] = ids.prefix(Int(count)).compactMap { id in
+        guard let uuid = ConfigIdentity.uuid(id) else { return nil }
+        let active = index.displays.first { $0.identifier == uuid }
+          .flatMap { d in d.currentIndex.map { d.spaces.indices.contains($0) ? d.spaces[$0].uuid : "" } }
+        return Display(
+          uuid: uuid, bounds: CGDisplayBounds(id),
+          activeSpaceUUID: (active?.isEmpty == false) ? active : nil)
+      }
+      return Topology(displays: displays)
+    }
+  }
+
+  /// Read the live window state `decide` classifies against. One AX sweep + one CGWindowList read + one
+  /// topology read; `nil` on a failed SkyLight load (cid == 0) so callers can surface `readFailed` instead
+  /// of acting on nothing (M4).
   static func gatherLiveState() -> LiveState? {
     let cid = cgsMainConnection()
     guard cid != 0 else { return nil }
-    return LiveState(cid: cid, reachable: reachableWindows(), existence: enumerateExistence())
+    let index = DesktopIndex.live(cid)
+    return LiveState(
+      cid: cid, reachable: reachableWindows(), existence: enumerateExistence(),
+      desktopIndex: index, topology: Topology.live(index: index))
   }
 
   /// Classify every captured window against live state — each paired with its `Action`. The seam #keeps-12's
@@ -92,7 +157,9 @@ public enum Restore {
     CapturedWindow, Action
   )] {
     snapshot.windows.map { cap in
-      let match = matchFor(cap, cid: live.cid, reachable: live.reachable, existence: live.existence)
+      let match = matchFor(
+        cap, cid: live.cid, reachable: live.reachable, existence: live.existence,
+        topology: live.topology)
       return (cap, decide(cap, match: match, tolerance: tolerance))
     }
   }
@@ -140,18 +207,48 @@ public enum Restore {
           + DebugTrace.displaysHeader(dbg))
     }
     for (cap, action) in classify(snapshot, against: live, tolerance: tolerance) {
-      let before = DebugTrace.enabled ? live.existence.frames[cap.cgWindowId] : nil
+      let before = live.existence.frames[cap.cgWindowId]  // the trace's "before" AND the #keeps-17 restitution target
+      var label = action.label  // reclassified to a skip reason when verify-after-place restitutes (#keeps-17)
       switch action {
-      case .place(let frame):
+      case .place(let frame, let verifySpace):
         planned += 1
         if apply, let el = live.reachable[cap.cgWindowId]?.element {  // dry run, or lost the element, ⇒ count only
           let ok = setFrame(el, frame)
-          if ok { applied += 1 } else { failures += 1 }
+          var decision = ok ? "placed" : "place-FAILED(axSet)"
+          if !ok { failures += 1 }
+          if ok, !verifySpace { applied += 1 }
+          if ok, verifySpace {
+            // #keeps-17 Q1: the guard PREDICTED this cross-display place lands on the window's own Space
+            // (landing display's active Space == captured spaceUUID) — but the re-home rule is macOS's, so
+            // enforce: POLL membership after the set (the re-home is WindowServer-async; an immediate read
+            // races it and restitutes a perfectly good place — Tom hit that live, 2026-07-06 23:45). A landing
+            // that still isn't home after the poll restitutes the frame (best-effort, Q4) and reclassifies the
+            // window as carry-deferred. Never a silent wrong-Space landing.
+            func landedSpace() -> String? {
+              cgsSpacesForWindow(live.cid, cap.cgWindowId).first
+                .flatMap { live.desktopIndex.uuid(ofManagedID: $0) }
+            }
+            var landed = landedSpace()
+            var waited = 0.0
+            while landed != cap.spaceUUID && waited < 1.5 {
+              Thread.sleep(forTimeInterval: 0.15)
+              waited += 0.15
+              landed = landedSpace()
+            }
+            if landed == cap.spaceUUID {
+              applied += 1
+            } else {
+              let restituted = before.map { setFrame(el, $0) } ?? false
+              skips[.deferredCrossDisplay, default: 0] += 1
+              label = SkipReason.deferredCrossDisplay.rawValue
+              decision = "placed-restituted(wrongSpace\(restituted ? "" : "; restitutionFailed"))"
+            }
+          }
           if DebugTrace.enabled && DebugTrace.traces(bundleId: cap.bundleId, title: cap.title) {
             DebugTrace.log(
               DebugTrace.windowLine(
                 bundleId: cap.bundleId, title: cap.title, wid: cap.cgWindowId,
-                decision: ok ? "placed" : "place-FAILED(axSet)", desired: frame, before: before,
+                decision: decision, desired: frame, before: before,
                 after: axFrame(el), displays: dbg))
           }
         } else if DebugTrace.enabled && DebugTrace.traces(bundleId: cap.bundleId, title: cap.title) {
@@ -173,7 +270,7 @@ public enum Restore {
       }
       outcomes.append(
         Outcome(
-          bundleId: cap.bundleId, title: cap.title, cgWindowId: cap.cgWindowId, action: action.label
+          bundleId: cap.bundleId, title: cap.title, cgWindowId: cap.cgWindowId, action: label
         ))
     }
     return Result(
@@ -232,19 +329,24 @@ public enum Restore {
   /// minimized/junk (0 spaces, the M1 fix) — never for the hundreds the reachable set already covers.
   private static func matchFor(
     _ cap: CapturedWindow, cid: CGSConnectionID,
-    reachable: [CGWindowID: Reachable], existence: Existence
+    reachable: [CGWindowID: Reachable], existence: Existence, topology: Topology
   ) -> Match? {
     if let r = reachable[cap.cgWindowId] {
+      let live = existence.frames[cap.cgWindowId]
+      let landing = topology.displayContaining(cap.frame)  // where an AX-set would land TODAY (#keeps-17)
       return Match(
         reachable: true, minimized: r.minimized,
         liveSpaceCount: 1,  // don't-care when reachable; decide() gates on `reachable`
-        liveFrame: existence.frames[cap.cgWindowId])
+        liveFrame: live,
+        currentDisplay: live.flatMap { topology.displayContaining($0)?.uuid },
+        landingDisplay: landing?.uuid,
+        landingActiveSpace: landing?.activeSpaceUUID)
     }
     guard existence.ids.contains(cap.cgWindowId) else { return nil }  // not in .optionAll at all ⇒ gone
     return Match(
       reachable: false, minimized: false,  // not-in-AX minimized is caught by the 0-space check
       liveSpaceCount: cgsSpacesForWindow(cid, cap.cgWindowId).count,
-      liveFrame: existence.frames[cap.cgWindowId])
+      liveFrame: existence.frames[cap.cgWindowId])  // guard facts stay nil — decide's guard sits on the place path only
   }
 
   /// AX size→pos→size — defeats apps that move-on-resize and constraints that drop a lone trailing size-set

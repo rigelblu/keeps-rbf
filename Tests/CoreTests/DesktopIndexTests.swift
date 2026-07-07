@@ -58,4 +58,17 @@ import Testing
   @Test func totalDesktopsSumsAllDisplays() {
     #expect(index().totalDesktops == 21)
   }
+
+  @Test func uuidOfManagedIDSpeaksTheCapturedIdentity() {  // #keeps-17 verify-after-place: landed int → stable uuid
+    #expect(index().uuid(ofManagedID: 104) == "d1s4")
+    #expect(index().uuid(ofManagedID: 999) == nil)
+  }
+
+  @Test func uuidOfManagedIDTreatsEmptyAsUnknown() {  // CGS can leave a space's uuid "" — unknown, never ""
+    let idx = DesktopIndex(displays: [
+      DesktopIndex.Display(
+        identifier: "D", spaces: [DesktopIndex.Space(uuid: "", managedID: 7)], currentIndex: nil)
+    ])
+    #expect(idx.uuid(ofManagedID: 7) == nil)
+  }
 }
