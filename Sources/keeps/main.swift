@@ -1,5 +1,5 @@
 // keeps — the menu-bar host (#keeps-2). Modes:
- //   (default)        menu-bar app: a status item + "Save Workspace Layout" + Quit
+ //   (default)        menu-bar app: a status item + "Save/Restore Window Layouts & Spaces" + Quit
  //   --capture-once   capture → store once, print a summary, exit   (Scenario A/E self-verify)
  //   --print          capture → print JSON to stdout (no store), exit
  //   --watch          Gate-1 probe: log each reconfig event + how many windows are readable RIGHT NOW
@@ -192,7 +192,6 @@
    var watcher: Watcher?  // held so the CG reconfig registration survives
    var settleDebounce: Timer?  // coalesces the reconfig burst into one settle action once it's quiet
    var lastSettled: String?  // the config we last acted on — guards the sleep/wake spurious restore (#keeps-3)
-   var carryItem: NSMenuItem!  // #keeps-13: the one-tap "bring back N windows" offer — hidden until phase 1 leaves windows off-Space
    var pendingCarry: PendingCarry? {  // the live carry offer; nil ⇒ nothing stranded off-Space
      didSet {
        refreshAffordance()
@@ -213,18 +212,15 @@
      statusLine.isEnabled = false  // info-only; shows what the last capture/restore did
      menu.addItem(statusLine)
      menu.addItem(.separator())
-     carryItem = NSMenuItem(
-       title: "Bring back windows on other Spaces",
-       action: #selector(bringBackOffSpaceWindows), keyEquivalent: "")
-     carryItem.target = self
-     carryItem.isHidden = true  // #keeps-13: shown only when phase-1 restore leaves windows stranded on other Spaces
-     menu.addItem(carryItem)
+     // #keeps-16: ONE verb — the user never thinks about which kind of restore this is; keeps figures it out
+     // (silent places, then the carry for anything stranded). The badge (▢ N) is the pending-work signifier;
+     // the dock-in notification (#keeps-18, packaging-gated) becomes the direct tap.
      let restoreItem = NSMenuItem(
-       title: "Restore Workspace Layout", action: #selector(restore), keyEquivalent: "r")
+       title: "Restore Window Layouts & Spaces", action: #selector(restore), keyEquivalent: "r")
      restoreItem.target = self
      menu.addItem(restoreItem)
      let saveItem = NSMenuItem(
-       title: "Save Workspace Layout", action: #selector(save), keyEquivalent: "s")
+       title: "Save Window Layouts & Spaces", action: #selector(save), keyEquivalent: "s")
      saveItem.target = self
      menu.addItem(saveItem)
      menu.addItem(.separator())
@@ -309,23 +305,38 @@
      }
    }
  
-   @objc func restore() { performRestore(reason: "manual") }
- 
-   private func performRestore(reason: String) {
+   // #keeps-16: the explicit verb finishes the job. The restore/carry split is a CONSENT boundary, not a
+   // value boundary — the carry hijacks cursor + Space views, so it's never sprung on the AUTO path (reconfig
+   // → silent restore → one-tap offer). But an explicit click IS consent: the user asked for their layout and
+   // is waiting, so phase 1 flows straight into the carry for whatever remains. Moving the mouse still stops it.
+   @objc func restore() {
+     // Gate the flow-into on THIS run's outcome, not on `pendingCarry`. Every failure exit below leaves that
+     // property untouched, so a stale offer from an earlier AUTO restore would otherwise launch the
+     // cursor-hijacking carry after a phase 1 that placed nothing — the disruptive half of the verb without
+     // the useful half, with the ⚠ it just set immediately overwritten by the carry's "⟳". On success the
+     // property was assigned microseconds ago, so reading it here is reading this run's own answer.
+     guard performRestore(reason: "manual") else { return }
+     if pendingCarry != nil { bringBackOffSpaceWindows() }
+   }
+
+   /// Returns whether phase 1 actually ran to completion — the caller needs that to decide consent, and only
+   /// a completed run leaves `pendingCarry` holding a fresh answer.
+   @discardableResult
+   private func performRestore(reason: String) -> Bool {
      let store = Store()
      let fp = ConfigIdentity.fingerprint()
      guard store.exists(fingerprint: fp) else {
        statusLine.title = "No saved layout for this config yet — Save it first"
        tick("⚠")
-       return
+       return false
      }
-     guard ensureAccessibility() else { return }  // lazy prompt + Needs-Accessibility state; no-op until granted
+     guard ensureAccessibility() else { return false }  // lazy prompt + Needs-Accessibility state; no-op until granted
      do {
        let r = Restore.restore(try store.load(fingerprint: fp), apply: true)
        guard !r.readFailed else {
          log.error("restore (\(reason, privacy: .public)): SkyLight read failed (cid==0)")
          tick("⚠")
-         return
+         return false
        }
        log.info(
          "restore (\(reason, privacy: .public)): placed \(r.applied)/\(r.planned), deferred \(r.carryDeferred), fp=\(fp, privacy: .public)"
@@ -333,10 +344,12 @@
        noteRestore(r, reason)
        pendingCarry = CarryAffordance.afterRestore(fingerprint: fp, deferred: r.carryDeferred)  // #keeps-13: offer the carry iff a tap can bring windows home (#keeps-17.3 honest count)
        tick("⟳")
+       return true
      } catch {
        log.error("restore (\(reason, privacy: .public)) failed: \(error.localizedDescription)")
        statusLine.title = "Restore failed: \(error.localizedDescription)"
        tick("⚠")
+       return false
      }
    }
  
@@ -448,15 +461,9 @@
      }
    }
 
-   // #keeps-13: render the carry offer. A thin renderer of `pendingCarry` — the decision lives in
-   // CarryAffordance; the menu item + status badge only reflect it. Runs on `pendingCarry`'s didSet.
+   // #keeps-13/#keeps-16: render the carry offer as the badge alone — the menu carries one verb, not a rival
+   // item. The decision lives in CarryAffordance; the badge only reflects it. Runs on `pendingCarry`'s didSet.
    private func refreshAffordance() {
-     if let p = pendingCarry {
-       carryItem?.isHidden = false
-       carryItem?.title = "Bring back \(p.count) window\(p.count == 1 ? "" : "s") on other Spaces"
-     } else {
-       carryItem?.isHidden = true
-     }
      statusItem?.button?.title = baseGlyph()
    }
 
