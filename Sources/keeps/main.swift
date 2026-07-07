@@ -216,6 +216,11 @@
      menu.addItem(
        NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
      statusItem.menu = menu
+     if DebugTrace.enabled {
+       DebugTrace.log(
+         "=== keeps launched — debug trace active\(DebugTrace.focusNote) — displays: "
+           + DebugTrace.displaysHeader(DebugTrace.activeDisplays()))
+     }
  
      // Arbitration (#keeps-3): the CG reconfig event is BOTH capture's and restore's trigger, so on a settled
      // config-change we RESTORE a config we've seen before and CAPTURE (learn) one we haven't — never capture a
