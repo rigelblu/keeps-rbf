@@ -23,12 +23,12 @@ import Testing
     reachable: Bool = true, minimized: Bool = false, spaceCount: Int = 1,
     liveFrame: WindowFrame? = WindowFrame(x: 100, y: 100, w: 800, h: 600),
     currentDisplay: String? = "DISP-A", landingDisplay: String? = "DISP-A",
-    landingActiveSpace: String? = nil
+    landingActiveSpace: String? = nil, currentSpace: String? = nil
   ) -> Restore.Match {
     Restore.Match(
       reachable: reachable, minimized: minimized, liveSpaceCount: spaceCount, liveFrame: liveFrame,
       currentDisplay: currentDisplay, landingDisplay: landingDisplay,
-      landingActiveSpace: landingActiveSpace)
+      landingActiveSpace: landingActiveSpace, currentSpace: currentSpace)
   }
 
   @Test func placesReachableWindowOffSpot() {
@@ -136,6 +136,34 @@ import Testing
   @Test func alreadyCorrectBeatsTheGuard() {  // an already-home window needs no guard — order pinned
     let m = match(landingDisplay: nil)  // even an off-screen-looking target: the window IS at its captured frame
     #expect(Restore.decide(cap(), match: m) == .skip(.alreadyCorrect))
+  }
+
+  // #keeps-15 slice 2 (v0.6.0): background idempotence — an unreachable window that is fully home (frame at
+  // its captured spot AND on its captured Space) is alreadyCorrect, so the carry offer never overcounts.
+  // Unknown current Space or sticky ⇒ defer as before (fail-safe).
+  @Test func backgroundWindowFullyHomeIsAlreadyCorrect() {
+    let m = match(reachable: false, currentSpace: "S")  // default liveFrame == captured frame
+    #expect(Restore.decide(cap(), match: m) == .skip(.alreadyCorrect))
+  }
+
+  @Test func backgroundWindowOffSpotStillDefers() {
+    let m = match(reachable: false, liveFrame: WindowFrame(x: 0, y: 0, w: 800, h: 600), currentSpace: "S")
+    #expect(Restore.decide(cap(), match: m) == .skip(.deferredBackground))
+  }
+
+  @Test func backgroundWindowWrongSpaceStillDefers() {
+    let m = match(reachable: false, currentSpace: "OTHER")
+    #expect(Restore.decide(cap(), match: m) == .skip(.deferredBackground))
+  }
+
+  @Test func backgroundWindowUnknownSpaceStillDefers() {  // nil currentSpace ⇒ can't prove home ⇒ fail-safe
+    let m = match(reachable: false)
+    #expect(Restore.decide(cap(), match: m) == .skip(.deferredBackground))
+  }
+
+  @Test func stickyBackgroundWindowStaysSticky() {  // sticky is excluded from the shortcut (no single home Space)
+    let m = match(reachable: false, spaceCount: 5, currentSpace: "S")
+    #expect(Restore.decide(cap(sticky: true), match: m) == .skip(.sticky))
   }
 
   @Test func displayContainingUsesCenterRule() {  // the guard's landing resolution == the trace's displayOf rule
