@@ -8,6 +8,7 @@
  import ApplicationServices  // AXIsProcessTrusted for the restore path
  import Core
  import CoreGraphics
+ import UserNotifications
  import os
 
  let log = Logger(subsystem: "com.rigelblu.keeps", category: "main")
@@ -185,12 +186,24 @@
  }
  
  // default: menu-bar app
- final class AppDelegate: NSObject, NSApplicationDelegate {
+ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
    var statusItem: NSStatusItem!
    var statusLine: NSMenuItem!  // glanceable "last capture" line so you can SEE it's working
    var watcher: Watcher?  // held so the CG reconfig registration survives
    var settleDebounce: Timer?  // coalesces the reconfig burst into one settle action once it's quiet
    var lastSettled: String?  // the config we last acted on — guards the sleep/wake spurious restore (#keeps-3)
+   var carryItem: NSMenuItem!  // #keeps-13: the one-tap "bring back N windows" offer — hidden until phase 1 leaves windows off-Space
+   var pendingCarry: PendingCarry? {  // the live carry offer; nil ⇒ nothing stranded off-Space
+     didSet {
+       refreshAffordance()
+       if let p = pendingCarry, p != oldValue { notifyOffer(p) }  // #keeps-13: nudge once when a new offer is raised
+     }
+   }
+   // #keeps-13 notification half: a UserNotifications nudge mirroring the menu offer. Gated on a real app bundle —
+   // an unbundled SwiftPM binary has no bundleIdentifier and can't post, so it degrades cleanly to menu-only.
+   private static let carryCategoryID = "keeps.carry"
+   private static let bringBackActionID = "keeps.bringBack"
+   private var notificationsAvailable: Bool { Bundle.main.bundleIdentifier != nil }
  
    func applicationDidFinishLaunching(_ note: Notification) {
      statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -200,14 +213,16 @@
      statusLine.isEnabled = false  // info-only; shows what the last capture/restore did
      menu.addItem(statusLine)
      menu.addItem(.separator())
+     carryItem = NSMenuItem(
+       title: "Bring back windows on other Spaces",
+       action: #selector(bringBackOffSpaceWindows), keyEquivalent: "")
+     carryItem.target = self
+     carryItem.isHidden = true  // #keeps-13: shown only when phase-1 restore leaves windows stranded on other Spaces
+     menu.addItem(carryItem)
      let restoreItem = NSMenuItem(
        title: "Restore Workspace Layout", action: #selector(restore), keyEquivalent: "r")
      restoreItem.target = self
      menu.addItem(restoreItem)
-     let carryItem = NSMenuItem(
-       title: "Restore Desktops", action: #selector(restoreDesktops), keyEquivalent: "d")
-     carryItem.target = self
-     menu.addItem(carryItem)
      let saveItem = NSMenuItem(
        title: "Save Workspace Layout", action: #selector(save), keyEquivalent: "s")
      saveItem.target = self
@@ -216,6 +231,7 @@
      menu.addItem(
        NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
      statusItem.menu = menu
+     setupNotifications()  // #keeps-13: register the carry nudge if this build can post (bundled); else menu-only
      if DebugTrace.enabled {
        DebugTrace.log(
          "=== keeps launched — debug trace active\(DebugTrace.focusNote) — displays: "
@@ -282,6 +298,7 @@
        performRestore(reason: reason)
      case .capture:
        lastSettled = fp
+       pendingCarry = nil  // #keeps-13: a never-seen config has no carry offer — supersede any stale one
        autoCapture(reason: reason)
      case .skipNoChange:
        log.info(
@@ -311,9 +328,10 @@
          return
        }
        log.info(
-         "restore (\(reason, privacy: .public)): placed \(r.applied)/\(r.planned), deferred \(r.deferredBackground), fp=\(fp, privacy: .public)"
+         "restore (\(reason, privacy: .public)): placed \(r.applied)/\(r.planned), deferred \(r.carryDeferred), fp=\(fp, privacy: .public)"
        )
        noteRestore(r, reason)
+       pendingCarry = CarryAffordance.afterRestore(fingerprint: fp, deferred: r.carryDeferred)  // #keeps-13: offer the carry iff a tap can bring windows home (#keeps-17.3 honest count)
        tick("⟳")
      } catch {
        log.error("restore (\(reason, privacy: .public)) failed: \(error.localizedDescription)")
@@ -322,11 +340,12 @@
      }
    }
  
-   // The deliberate VISIBLE carry (#keeps-12): carry this config's deferred-background windows back to their
-   // captured desktops. Drives macOS's own ⌥⌘N / ⌃→ shortcuts (takes over the cursor, flips desktops), so it
-   // runs OFF the main actor in a Task — its ~1.1s/step waits yield, keeping the menu live and the cursor-drift
-   // abort responsive (move the mouse to stop it). UI updates hop back to main.
-   @objc func restoreDesktops() {
+   // The #keeps-13 one-tap carry: the user taps the "bring back N windows" offer (raised after a phase-1 restore
+   // left windows on other Spaces) and we carry this config's deferred-background windows back to their captured
+   // desktops via the verified #keeps-12 mechanism. Drives macOS's own ⌥⌘N / ⌃→ shortcuts (takes over the cursor,
+   // flips desktops), so it runs OFF the main actor in a Task — its ~1.1s/step waits yield, keeping the menu live
+   // and the cursor-drift abort responsive (move the mouse to stop it). UI updates hop back to main.
+   @objc func bringBackOffSpaceWindows() {
      guard ensureAccessibility() else { return }  // the carry's synthetic input needs the same trust restore does
      let store = Store()
      let fp = ConfigIdentity.fingerprint()
@@ -367,6 +386,8 @@
      let abortNote = r.aborted ? " · aborted@\(r.abortedAfter)" : ""
      statusLine.title =
        "Carried \(r.carried)/\(r.plannedCarries) · skipped \(r.skipped)\(abortNote) · \(f.string(from: Date()))"
+     // #keeps-13: a clean carry fulfills the offer; an abort keeps it so the user can resume the remainder.
+     if !r.aborted { pendingCarry = nil }
      tick(r.aborted ? "⚠" : "⟳")
    }
 
@@ -423,8 +444,79 @@
    private func tick(_ glyph: String) {
      statusItem.button?.title = glyph
      DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-       self?.statusItem.button?.title = "▢"
+       self?.statusItem.button?.title = self?.baseGlyph() ?? "▢"
      }
+   }
+
+   // #keeps-13: render the carry offer. A thin renderer of `pendingCarry` — the decision lives in
+   // CarryAffordance; the menu item + status badge only reflect it. Runs on `pendingCarry`'s didSet.
+   private func refreshAffordance() {
+     if let p = pendingCarry {
+       carryItem?.isHidden = false
+       carryItem?.title = "Bring back \(p.count) window\(p.count == 1 ? "" : "s") on other Spaces"
+     } else {
+       carryItem?.isHidden = true
+     }
+     statusItem?.button?.title = baseGlyph()
+   }
+
+   // The resting status-bar glyph: a plain box, badged with the off-Space count while a carry is pending.
+   private func baseGlyph() -> String { pendingCarry.map { "▢ \($0.count)" } ?? "▢" }
+
+   // Register the #keeps-13 carry nudge's category + action and become the center's delegate so taps route to the
+   // carry. No-ops on an unbundled build (no bundle id → can't post) so dogfood stays menu-only — by design.
+   private func setupNotifications() {
+     guard notificationsAvailable else {
+       log.info("notifications: unavailable (no bundle id) — carry offer is menu-only")
+       return
+     }
+     let center = UNUserNotificationCenter.current()
+     center.delegate = self
+     let bringBack = UNNotificationAction(
+       identifier: Self.bringBackActionID, title: "Bring them back", options: [.foreground])
+     center.setNotificationCategories([
+       UNNotificationCategory(
+         identifier: Self.carryCategoryID, actions: [bringBack], intentIdentifiers: [], options: [])
+     ])
+   }
+
+   // Post (or replace) the carry nudge for a freshly-raised offer. Reuses one notification id so a new offer
+   // supersedes the old (no stacking — mirrors the single pending slot). Lazy authorization; silent if denied.
+   private func notifyOffer(_ p: PendingCarry) {
+     guard notificationsAvailable else { return }  // the menu item carries the offer on unbundled builds
+     UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
+       guard granted else { return }
+       let content = UNMutableNotificationContent()
+       content.title = "keeps"
+       content.body =
+         p.count == 1
+         ? "1 window is on another Space — bring it back?"
+         : "\(p.count) windows are on other Spaces — bring them back?"
+       content.categoryIdentifier = Self.carryCategoryID
+       UNUserNotificationCenter.current().add(
+         UNNotificationRequest(identifier: "keeps.carry-offer", content: content, trigger: nil))
+     }
+   }
+
+   // Show the nudge even while keeps is the active app context (menu-bar apps otherwise suppress it in-foreground).
+   func userNotificationCenter(
+     _ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+   ) {
+     completionHandler([.banner, .sound])
+   }
+
+   // A tap on the nudge (its "Bring them back" action, or the body) runs the same carry as the menu offer.
+   func userNotificationCenter(
+     _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+     withCompletionHandler completionHandler: @escaping () -> Void
+   ) {
+     if response.actionIdentifier == Self.bringBackActionID
+       || response.actionIdentifier == UNNotificationDefaultActionIdentifier
+     {
+       DispatchQueue.main.async { [weak self] in self?.bringBackOffSpaceWindows() }
+     }
+     completionHandler()
    }
  }
  
