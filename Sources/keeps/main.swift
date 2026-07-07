@@ -188,7 +188,8 @@
  // default: menu-bar app
  final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
    var statusItem: NSStatusItem!
-   var statusLine: NSMenuItem!  // glanceable "last capture" line so you can SEE it's working
+   var statusLine: NSMenuItem!  // glanceable "last activity" line — hidden until there's something to say (#keeps-19)
+   var statusSeparator: NSMenuItem!  // rides with statusLine so a hidden line doesn't leave a leading separator
    var watcher: Watcher?  // held so the CG reconfig registration survives
    var settleDebounce: Timer?  // coalesces the reconfig burst into one settle action once it's quiet
    var lastSettled: String?  // the config we last acted on — guards the sleep/wake spurious restore (#keeps-3)
@@ -198,20 +199,38 @@
        if let p = pendingCarry, p != oldValue { notifyOffer(p) }  // #keeps-13: nudge once when a new offer is raised
      }
    }
+   // #keeps-19: the in-flight signifier — while a carry runs, the run is the glyph's ONLY writer (isCarrying
+   // guards every other writer, incl. tick()'s uncancellable deferred reset, checked at fire time) and the
+   // status item animates with live progress (◐ 2/5; Reduce Motion → static ⟳ 2/5).
+   private var isCarrying = false
+   private var carryTimer: Timer?
+   private var carryFrame = 0
+   private var carryProgress: (done: Int, total: Int)?
    // #keeps-13 notification half: a UserNotifications nudge mirroring the menu offer. Gated on a real app bundle —
    // an unbundled SwiftPM binary has no bundleIdentifier and can't post, so it degrades cleanly to menu-only.
-   private static let carryCategoryID = "keeps.carry"
+   // #keeps-19: TWO offer categories (one/many) — action titles are baked at registration, and re-registering per
+   // offer would mutate global category state under an in-flight notification; the verdict posts on its own id.
+   private static let carryCategoryOneID = "keeps.carry.one"
+   private static let carryCategoryManyID = "keeps.carry.many"
    private static let bringBackActionID = "keeps.bringBack"
+   private static let offerNotificationID = "keeps.carry-offer"
+   private static let verdictNotificationID = "keeps.carry-verdict"
    private var notificationsAvailable: Bool { Bundle.main.bundleIdentifier != nil }
  
    func applicationDidFinishLaunching(_ note: Notification) {
      statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
      statusItem.button?.title = "▢"  // placeholder glyph; the real icon is packaging (deferred)
      let menu = NSMenu()
-     statusLine = NSMenuItem(title: "No activity yet", action: nil, keyEquivalent: "")
+     // #keeps-19: the status line exists only when it has something real to say (last activity, an
+     // in-flight carry, an error) — idle shows nothing: no message beats a filler message, and every
+     // "watching…" phrasing reads as surveillance (Tom, 2026-07-07).
+     statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
      statusLine.isEnabled = false  // info-only; shows what the last capture/restore did
+     statusLine.isHidden = true
+     statusSeparator = NSMenuItem.separator()
+     statusSeparator.isHidden = true
      menu.addItem(statusLine)
-     menu.addItem(.separator())
+     menu.addItem(statusSeparator)
      // #keeps-16: ONE verb — the user never thinks about which kind of restore this is; keeps figures it out
      // (silent places, then the carry for anything stranded). The badge (▢ N) is the pending-work signifier;
      // the dock-in notification (#keeps-18, packaging-gated) becomes the direct tap.
@@ -318,7 +337,7 @@
      let store = Store()
      let fp = ConfigIdentity.fingerprint()
      guard store.exists(fingerprint: fp) else {
-       statusLine.title = "No saved layout for this config yet — Save it first"
+       note("No saved layout for this config yet — Save it first")
        tick("⚠")
        return
      }
@@ -338,7 +357,7 @@
        tick("⟳")
      } catch {
        log.error("restore (\(reason, privacy: .public)) failed: \(error.localizedDescription)")
-       statusLine.title = "Restore failed: \(error.localizedDescription)"
+       note("Restore failed: \(error.localizedDescription)")
        tick("⚠")
      }
    }
@@ -349,48 +368,80 @@
    // flips desktops), so it runs OFF the main actor in a Task — its ~1.1s/step waits yield, keeping the menu live
    // and the cursor-drift abort responsive (move the mouse to stop it). UI updates hop back to main.
    @objc func bringBackOffSpaceWindows() {
+     guard !isCarrying else { return }  // #keeps-19: one carry at a time — a second tap mid-run (offer banner,
+     // ⌘R, menu) would race two synthetic-input drivers and leak the first signifier timer
      guard ensureAccessibility() else { return }  // the carry's synthetic input needs the same trust restore does
      let store = Store()
      let fp = ConfigIdentity.fingerprint()
      guard store.exists(fingerprint: fp), let snap = try? store.load(fingerprint: fp) else {
-       statusLine.title = "No saved layout for this config yet — Save it first"
+       note("No saved layout for this config yet — Save it first")
        tick("⚠")
        return
      }
-     statusLine.title = "Carrying desktops… (move the mouse to stop)"
-     statusItem.button?.title = "⟳"
+     note("Carrying desktops… (move the mouse to stop)")
+     startCarrySignifier()  // #keeps-19: the run owns the glyph from here to finishCarry
      Task { @MainActor in
        let r = await Carry.carry(snap, apply: true) { p in
          DispatchQueue.main.async {
-           self.statusLine.title = "Carrying \(p.done)/\(p.total) · desktop \(p.toDesktop)…"
+           self.carryProgress = (p.done, p.total)  // #keeps-19: the timer renders this on its next frame
+           self.note("Carrying \(p.done)/\(p.total) · desktop \(p.toDesktop)…")
          }
        }
        self.finishCarry(r, fp: fp)  // resumes on the main actor after the carry completes
      }
    }
 
+   // #keeps-19: the in-flight status-item signifier — an animated frame cycle + live progress (◐ 2/5), static
+   // under Reduce Motion. Run-scoped: started here, stopped at the TOP of finishCarry (before its early returns,
+   // which would leak a bottom-placed invalidate). Rendering is pure (CarrySignifier); this owns only the timer.
+   private func startCarrySignifier() {
+     isCarrying = true
+     carryFrame = 0
+     carryProgress = nil
+     renderCarrySignifier()
+     carryTimer = Timer.scheduledTimer(  // target/selector form: main-runloop, no @Sendable self capture
+       timeInterval: 0.25, target: self, selector: #selector(carryTimerTick), userInfo: nil,
+       repeats: true)
+   }
+
+   @objc private func carryTimerTick() {
+     carryFrame += 1
+     renderCarrySignifier()
+   }
+
+   private func stopCarrySignifier() {
+     carryTimer?.invalidate()
+     carryTimer = nil
+     isCarrying = false
+   }
+
+   private func renderCarrySignifier() {
+     statusItem?.button?.title = CarrySignifier.title(
+       frame: carryFrame, progress: carryProgress,
+       reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+   }
+
    private func finishCarry(_ r: Carry.CarryResult, fp: String) {
+     stopCarrySignifier()  // #keeps-19: FIRST, before any early return — a bottom-placed stop would leak the timer
      if r.readFailed {
        log.error("carry: SkyLight read failed (cid==0)")
-       statusLine.title = "Carry failed — SkyLight read"
+       note("Carry failed — SkyLight read")
        tick("⚠")
        return
      }
      if r.navigationDead {
-       statusLine.title = "Can't navigate desktops — enable Switch-to-Desktop shortcuts"
+       note("Can't navigate desktops — enable Switch-to-Desktop shortcuts")
        tick("⚠")
        return
      }
      log.info(
        "carry: carried \(r.carried)/\(r.plannedCarries), skipped \(r.skipped), aborted=\(r.aborted), fp=\(fp, privacy: .public)"
      )
-     let f = DateFormatter()
-     f.dateFormat = "HH:mm:ss"
-     let abortNote = r.aborted ? " · aborted@\(r.abortedAfter)" : ""
-     statusLine.title =
-       "Carried \(r.carried)/\(r.plannedCarries) · skipped \(r.skipped)\(abortNote) · \(f.string(from: Date()))"
+     let abortNote = r.aborted ? " · stopped after \(r.abortedAfter)" : ""
+     note("Last restored: \(stamp()) · \(r.carried) carried\(abortNote)")
      // #keeps-13: a clean carry fulfills the offer; an abort keeps it so the user can resume the remainder.
      if !r.aborted { pendingCarry = nil }
+     notifyVerdict(r)  // #keeps-19: the run's outcome is delivered, not fetched
      tick(r.aborted ? "⚠" : "⟳")
    }
 
@@ -401,7 +452,7 @@
      // kAXTrustedCheckOptionPrompt is imported inconsistently across SDKs (CFString vs Unmanaged); its value is
      // the stable string "AXTrustedCheckOptionPrompt", so use that directly to dodge the import ambiguity.
      _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
-     statusLine.title = "Needs Accessibility — grant it in System Settings, then Restore again"
+     note("Needs Accessibility — grant it in System Settings, then Restore again")
      statusItem.button?.title = "!"
      return false
    }
@@ -429,39 +480,57 @@
      }
    }
  
-   // Glanceable status: update the menu's top line so a click shows what the last capture did.
+   // The ONE status writer: the line (and its separator) exists only while it has something real to say —
+   // last activity, an in-flight carry, an error. Idle shows nothing (#keeps-19; Tom: "watching" reads as
+   // surveillance, and no message beats a filler message).
+   private func note(_ text: String) {
+     statusLine.title = text
+     statusLine.isHidden = false
+     statusSeparator.isHidden = false
+   }
+
+   // Glanceable status: the menu's top line says what keeps last did, in words a glance can use — no
+   // fingerprint hex, date included (a bare HH:mm goes ambiguous after a day of running). #keeps-19
+   private func stamp() -> String {
+     let f = DateFormatter()
+     f.dateFormat = "MMM d, HH:mm:ss"
+     return f.string(from: Date())
+   }
+
    private func noteCapture(_ snap: Snapshot, _ kind: String) {
-     let f = DateFormatter()
-     f.dateFormat = "HH:mm:ss"
-     statusLine.title =
-       "Last: \(snap.windows.count) windows · \(snap.configFingerprint.prefix(8)) · \(f.string(from: Date())) · \(kind)"
+     note("Last saved: \(stamp()) · \(snap.windows.count) windows")
    }
- 
+
    private func noteRestore(_ r: Restore.Result, _ kind: String) {
-     let f = DateFormatter()
-     f.dateFormat = "HH:mm:ss"
-     statusLine.title =
-       "Restored \(r.applied) · deferred \(r.deferredBackground) · \(ConfigIdentity.fingerprint().prefix(8)) · \(f.string(from: Date())) · \(kind)"
+     let tail = r.carryDeferred > 0 ? " · \(r.carryDeferred) on other Spaces" : ""
+     note("Last restored: \(stamp()) · \(r.applied) placed\(tail)")
    }
  
+   // #keeps-19: one-writer rule for the glyph — while a carry runs, the run's signifier is the ONLY writer.
+   // tick()'s deferred reset is uncancellable asyncAfter, so it's guarded at FIRE time; a mid-run save() or a
+   // reconfig-driven refreshAffordance is guarded the same way.
    private func tick(_ glyph: String) {
+     guard !isCarrying else { return }
      statusItem.button?.title = glyph
      DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-       self?.statusItem.button?.title = self?.baseGlyph() ?? "▢"
+       guard let self, !self.isCarrying else { return }
+       self.statusItem.button?.title = self.baseGlyph()
      }
    }
 
    // #keeps-13/#keeps-16: render the carry offer as the badge alone — the menu carries one verb, not a rival
    // item. The decision lives in CarryAffordance; the badge only reflects it. Runs on `pendingCarry`'s didSet.
    private func refreshAffordance() {
+     guard !isCarrying else { return }  // #keeps-19: the run owns the glyph; the badge re-renders at run end
      statusItem?.button?.title = baseGlyph()
    }
 
    // The resting status-bar glyph: a plain box, badged with the off-Space count while a carry is pending.
    private func baseGlyph() -> String { pendingCarry.map { "▢ \($0.count)" } ?? "▢" }
 
-   // Register the #keeps-13 carry nudge's category + action and become the center's delegate so taps route to the
-   // carry. No-ops on an unbundled build (no bundle id → can't post) so dogfood stays menu-only — by design.
+   // Register the #keeps-13 carry nudge's categories + action and become the center's delegate so taps route to
+   // the carry. No-ops on an unbundled build (no bundle id → can't post) so dogfood stays menu-only — by design.
+   // #keeps-19: two categories (one/many) carry the count-aware action titles; both route the same action id.
    private func setupNotifications() {
      guard notificationsAvailable else {
        log.info("notifications: unavailable (no bundle id) — carry offer is menu-only")
@@ -469,29 +538,58 @@
      }
      let center = UNUserNotificationCenter.current()
      center.delegate = self
-     let bringBack = UNNotificationAction(
-       identifier: Self.bringBackActionID, title: "Bring them back", options: [.foreground])
      center.setNotificationCategories([
        UNNotificationCategory(
-         identifier: Self.carryCategoryID, actions: [bringBack], intentIdentifiers: [], options: [])
+         identifier: Self.carryCategoryOneID,
+         actions: [
+           UNNotificationAction(
+             identifier: Self.bringBackActionID, title: CarrySignifier.offerActionTitle(count: 1),
+             options: [.foreground])
+         ], intentIdentifiers: [], options: []),
+       UNNotificationCategory(
+         identifier: Self.carryCategoryManyID,
+         actions: [
+           UNNotificationAction(
+             identifier: Self.bringBackActionID, title: CarrySignifier.offerActionTitle(count: 2),
+             options: [.foreground])
+         ], intentIdentifiers: [], options: []),
      ])
    }
 
    // Post (or replace) the carry nudge for a freshly-raised offer. Reuses one notification id so a new offer
    // supersedes the old (no stacking — mirrors the single pending slot). Lazy authorization; silent if denied.
+   // #keeps-19 copy: the body states the fact; the action button is the question (CarrySignifier owns the words).
    private func notifyOffer(_ p: PendingCarry) {
      guard notificationsAvailable else { return }  // the menu item carries the offer on unbundled builds
      UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
        guard granted else { return }
        let content = UNMutableNotificationContent()
        content.title = "keeps"
-       content.body =
-         p.count == 1
-         ? "1 window is on another Space — bring it back?"
-         : "\(p.count) windows are on other Spaces — bring them back?"
-       content.categoryIdentifier = Self.carryCategoryID
+       content.body = CarrySignifier.offerBody(count: p.count)
+       content.categoryIdentifier = p.count == 1 ? Self.carryCategoryOneID : Self.carryCategoryManyID
        UNUserNotificationCenter.current().add(
-         UNNotificationRequest(identifier: "keeps.carry-offer", content: content, trigger: nil))
+         UNNotificationRequest(identifier: Self.offerNotificationID, content: content, trigger: nil))
+     }
+   }
+
+   // #keeps-19: the completion verdict — one banner per finished carry run, on its OWN id (never the offer's).
+   // The fulfilled offer banner is withdrawn ONLY when no fresh offer stands: a reconfig mid-run re-raises the
+   // offer on the reused id, and withdrawing then would kill the fresh offer.
+   private func notifyVerdict(_ r: Carry.CarryResult) {
+     guard notificationsAvailable else { return }  // the status line carries the verdict on unbundled builds
+     let offerStands = pendingCarry != nil
+     UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
+       guard granted else { return }
+       let center = UNUserNotificationCenter.current()
+       if !offerStands {
+         center.removeDeliveredNotifications(withIdentifiers: [Self.offerNotificationID])
+       }
+       let content = UNMutableNotificationContent()
+       content.title = "keeps"
+       content.body = CarrySignifier.verdictBody(
+         carried: r.carried, planned: r.plannedCarries, aborted: r.aborted)
+       center.add(
+         UNNotificationRequest(identifier: Self.verdictNotificationID, content: content, trigger: nil))
      }
    }
 
@@ -503,13 +601,16 @@
      completionHandler([.banner, .sound])
    }
 
-   // A tap on the nudge (its "Bring them back" action, or the body) runs the same carry as the menu offer.
+   // A tap on the OFFER (its action button, or the body) runs the same carry as the menu offer. Gated on the
+   // offer's id: the #keeps-19 VERDICT banner shares this delegate, and a tap on a report is NOT consent to a
+   // carry — only the offer's body-tap carries that meaning.
    func userNotificationCenter(
      _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
      withCompletionHandler completionHandler: @escaping () -> Void
    ) {
+     let isOffer = response.notification.request.identifier == Self.offerNotificationID
      if response.actionIdentifier == Self.bringBackActionID
-       || response.actionIdentifier == UNNotificationDefaultActionIdentifier
+       || (isOffer && response.actionIdentifier == UNNotificationDefaultActionIdentifier)
      {
        DispatchQueue.main.async { [weak self] in self?.bringBackOffSpaceWindows() }
      }
