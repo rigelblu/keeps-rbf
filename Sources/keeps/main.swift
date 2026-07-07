@@ -143,7 +143,7 @@
      (apply
        ? "carried \(r.carried)/\(r.plannedCarries) planned\(r.aborted ? " (aborted after \(r.abortedAfter))" : "")"
        : "DRY RUN — would carry \(r.plannedCarries)")
-       + " of \(deferred) deferred-background windows (\(snap.windows.count) captured), fp=\(fp)")
+       + " of \(deferred) deferred windows (background + cross-display; \(snap.windows.count) captured), fp=\(fp)")
    print("skipped \(r.skipped): [\(skipStr)]")
    if args.contains("--verbose") {
      for o in r.outcomes.sorted(by: { $0.outcome < $1.outcome }) {

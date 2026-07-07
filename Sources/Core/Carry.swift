@@ -8,11 +8,12 @@
 // CURRENT live state, and `Restore.Result` threw away the spaceUUID/frame anyway — so it re-runs Restore.decide
 // over the snapshot via the shared seam and keeps the deferred windows (which carry the spaceUUID + frame).
 //
-// Two move types compose a carry, and neither alone is enough: a desktop switch (held drag) moves a window
-// between desktops on the SAME display; an AX frame-set moves it between displays (different global coords) but
-// NOT between desktops. So same-display targets are carried then placed. Cross-display targets cannot be
-// desktop-carried by this primitive; membership verification runs before AX placement, so a wrong-desktop window
-// is reported honestly instead of being framed into a misleading position.
+// Two move types compose a carry: a desktop switch (held titlebar through the user's real Space-switch
+// binding) moves a window between desktops on the SAME display; an AX frame-set moves it between displays AND
+// re-homes it onto the landing display's ACTIVE Space (#keeps-17.2 — the 2026-06-16 lever). So same-display
+// targets are held-carried then placed; cross-display targets are AX-placed INTO a pre-navigated target view —
+// the placement IS the Space move, no hold involved. Membership verification gates BOTH paths before anything
+// is reported carried; a cross-display landing that lies is restituted (best-effort) instead of left mis-framed.
 import Foundation
 import AppKit
 import CoreGraphics
@@ -149,6 +150,13 @@ public enum Carry {
         return candidates.filter { target.contains($0.point) }
     }
 
+    /// The skip reasons the carry owns (#keeps-17.3): windows silent restore deferred TO the carry — on a
+    /// background Space, or blocked by the cross-display Space guard. `unprovableSpace` and `offScreenTarget`
+    /// stay count-only: the carry can't resolve a target for them either.
+    static func isCarryDeferred(_ action: Restore.Action) -> Bool {
+        action == .skip(.deferredBackground) || action == .skip(.deferredCrossDisplay)
+    }
+
     /// The carry filter, as one pure function over the fresh deferred set + the live topology + the user's
     /// bindings. Order matters: target resolves → current resolves → not already there → both legs navigable.
     public static func plan(deferred: [DeferredWindow], spaceIndex: DesktopIndex, shortcuts: Shortcuts) -> [CarryAction] {
@@ -228,10 +236,11 @@ public enum Carry {
                                outcomes: [], dryRun: !apply, readFailed: false, navigationDead: true)
         }
 
-        // Fresh deferred set (Blocker-1): keep Restore.decide's `.deferredBackground` windows, each paired with its
-        // CURRENT live desktop (the int ManagedSpaceID cgsSpacesForWindow returns → global ordinal).
+        // Fresh deferred set (Blocker-1): keep the carry-owned deferrals — background-Space windows AND the
+        // #keeps-17 guard's cross-display ones — each paired with its CURRENT live desktop (the int
+        // ManagedSpaceID cgsSpacesForWindow returns → global ordinal).
         let deferred: [DeferredWindow] = Restore.classify(snapshot, against: live).compactMap { (cap, action) in
-            guard action == .skip(.deferredBackground) else { return nil }
+            guard isCarryDeferred(action) else { return nil }
             let currentMid = cgsSpacesForWindow(cid, cap.cgWindowId).first
             return DeferredWindow(captured: cap, currentGlobalDesktop: currentMid.flatMap { index.globalOrdinal(ofManagedID: $0) })
         }
@@ -245,6 +254,7 @@ public enum Carry {
         var carried = 0, done = 0, abortedAfter = 0, aborted = false
         var skips: [CarrySkip: Int] = [:]
         var outcomes: [Outcome] = []
+        expectedCursor = apply ? cursorLocation() : nil   // #keeps-17 Q3: the unheld-leg interrupt baseline
         for (dw, action) in zip(deferred, actions) {   // 1:1 — plan maps each deferred window to one action
             switch action {
             case .skip(let reason, let cap):
@@ -259,6 +269,13 @@ public enum Carry {
                 guard apply, !aborted else {   // dry run lists the plan; after an abort the rest are left untouched
                     outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to,
                                             outcome: apply ? "skipped (aborted)" : "would-carry"))
+                    continue
+                }
+                if userMoved() {   // #keeps-17 Q3: between-windows boundary sample — real input halts the run
+                    aborted = true; abortedAfter = carried
+                    skips[.userInterrupt, default: 0] += 1
+                    outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to,
+                                            outcome: CarrySkip.userInterrupt.rawValue))
                     continue
                 }
                 switch await executeCarry(cap, fromGlobal: from, toGlobal: to, index: index, shortcuts: shortcuts, cid: cid) {
@@ -313,6 +330,13 @@ public enum Carry {
         log.info("carry wid=\(cap.cgWindowId) on screen at (\(Int(bounds.minX)),\(Int(bounds.minY)) \(Int(bounds.width))×\(Int(bounds.height)))")
         try? await Task.sleep(for: .milliseconds(700))   // settle the freshly-navigated desktop before grabbing
 
+        // #keeps-17.2: a desktop switch moves a window on ONE display; a cross-display target takes the
+        // AX-place re-home path instead — branch BEFORE grabbing so the grip machinery stays out of it.
+        guard let to, let from, to.displayIndex == from.displayIndex else {
+            return await carryAcrossDisplays(cap, toGlobal: toGlobal, index: index, shortcuts: shortcuts,
+                                             cid: cid, preBounds: bounds)
+        }
+
         let initialParked: CGPoint
         switch await grabTitlebar(cap, bounds: bounds) {
         case .success(let point):
@@ -326,10 +350,9 @@ public enum Carry {
         func release() { if !released { endWindowGrab(at: parked); released = true } }
         defer { release() }   // FLOOR GUARANTEE: the synthetic drag is released on EVERY exit path
 
-        // 3) place-leg — carry the HELD window to its target desktop, but only when target + current share a
-        // display (a desktop switch can't move a window between displays). Cross-display falls through to the AX
-        // place below. A real mouse-move drifts the parked cursor mid-carry ⇒ abort + release.
-        if let to, let from, to.displayIndex == from.displayIndex, to.perDisplayIndex != from.perDisplayIndex {
+        // 3) place-leg — carry the HELD window to its target desktop (same display; the plan never emits
+        // from == to). A real mouse-move drifts the parked cursor mid-carry ⇒ abort + release.
+        if to.perDisplayIndex != from.perDisplayIndex {
             log.info("carry wid=\(cap.cgWindowId) held titlebar — place-leg stepping \(from.perDisplayIndex)→\(to.perDisplayIndex) on disp \(from.displayIndex)")
             switch await carryHeld(displayIndex: from.displayIndex, toIndex: to.perDisplayIndex,
                                    fromIndex: from.perDisplayIndex, toGlobal: toGlobal,
@@ -343,8 +366,6 @@ public enum Carry {
                 log.info("carry wid=\(cap.cgWindowId) ABORTED (cursor drift)")
                 return .aborted(reason)   // defer releases the drag at the parked point
             }
-        } else {
-            log.info("carry wid=\(cap.cgWindowId) place-leg skipped (cross-display or same desktop) — verifying membership before AX place")
         }
         // 4) commit the drag (drop), then let membership settle.
         release()
@@ -374,6 +395,68 @@ public enum Carry {
         }
         log.info("carry wid=\(cap.cgWindowId) landedOn=\(landedOn ?? -1) target=\(toGlobal) axPlaced=true → CARRIED")
         return .carried
+    }
+
+    /// #keeps-17.2 — the cross-display carry: point the TARGET display's view at the captured Space
+    /// (`navigateView`, unheld), then AX-place the window — the placement IS the Space move, because macOS
+    /// re-homes a cross-display AX move onto the landing display's ACTIVE Space (the 2026-06-16 lever, banked).
+    /// Membership is verified before anything is reported carried; a landing that lies is restituted to the
+    /// pre-carry frame (best-effort, Q4) so a failed carry leaves no visible damage. The user's brake is the
+    /// Q3 boundary sample: real cursor movement since our last synthetic park aborts before the AX-place.
+    private static func carryAcrossDisplays(_ cap: CapturedWindow, toGlobal: Int, index: DesktopIndex,
+                                            shortcuts: Shortcuts, cid: CGSConnectionID,
+                                            preBounds: CGRect) async -> CarryOutcome {
+        // place-leg (unheld) — switch the target display's view to the captured Space.
+        guard await navigateView(toGlobal: toGlobal, index: index, shortcuts: shortcuts, cid: cid) else {
+            log.info("carry wid=\(cap.cgWindowId) FAILED cross-display place-leg: couldn't reach to=\(toGlobal)")
+            return .failed(.spaceSwitchFailed)
+        }
+        try? await Task.sleep(for: .milliseconds(300))   // let the switch settle before the move
+        if userMoved() {   // Q3: the boundary brake before the irreversible action
+            log.info("carry wid=\(cap.cgWindowId) ABORTED (real input before cross-display place)")
+            return .aborted(.userInterrupt)
+        }
+        // the move — AX-place at the captured frame; WindowServer re-homes onto the target display's active
+        // Space, which navigateView just made the captured one.
+        guard placeFrame(cap) else {
+            log.info("carry wid=\(cap.cgWindowId) cross-display axPlaced=false → axPlaceFailed")
+            return .failed(.axPlaceFailed)
+        }
+        try? await Task.sleep(for: .milliseconds(500))   // membership settles after the re-home
+        let landedOn = await pollWindowGlobal(cap.cgWindowId, targetGlobal: toGlobal, index: index, cid: cid)
+        let carried = landedOn == toGlobal
+        var restitutionNote = ""
+        if !carried {
+            // restitute best-effort (Q4): put the frame back where the window was; the outcome stays specific.
+            let restituted = restituteFrame(cap, to: preBounds)
+            restitutionNote = restituted ? "; restituted" : "; restitutionFailed"
+        }
+        if DebugTrace.enabled && DebugTrace.traces(bundleId: cap.bundleId, title: cap.title) {
+            let displays = DebugTrace.activeDisplays()
+            let after = onScreenBounds(cap.cgWindowId).map {
+                WindowFrame(x: Int($0.minX), y: Int($0.minY), w: Int($0.width), h: Int($0.height))
+            }
+            DebugTrace.log(DebugTrace.windowLine(
+                bundleId: cap.bundleId, title: cap.title, wid: cap.cgWindowId,
+                decision: "carry→crossDisplay \(carried ? "ok" : "FAILED(membership\(restitutionNote))") (desktop \(toGlobal), landed=\(landedOn ?? -1))",
+                desired: cap.frame,
+                before: WindowFrame(x: Int(preBounds.minX), y: Int(preBounds.minY),
+                                    w: Int(preBounds.width), h: Int(preBounds.height)),
+                after: after, displays: displays))
+        }
+        guard carried else {
+            log.info("carry wid=\(cap.cgWindowId) cross-display landedOn=\(landedOn ?? -1) target=\(toGlobal) → membershipMismatch\(restitutionNote, privacy: .public)")
+            return .failed(.membershipMismatch)
+        }
+        log.info("carry wid=\(cap.cgWindowId) cross-display landedOn=\(toGlobal) → CARRIED")
+        return .carried
+    }
+
+    /// Best-effort frame restitution after a failed cross-display landing — the same public-AX write, aimed back.
+    private static func restituteFrame(_ cap: CapturedWindow, to bounds: CGRect) -> Bool {
+        guard let el = axElement(for: cap) else { return false }
+        return Restore.setFrame(el, WindowFrame(x: Int(bounds.minX), y: Int(bounds.minY),
+                                                w: Int(bounds.width), h: Int(bounds.height)))
     }
 
     /// Carry a HELD window across desktops on its current display: one global ⌥⌘N jump if the target is directly
@@ -418,7 +501,7 @@ public enum Carry {
             return await poll(displayIdx: dispIdx, until: { $0 == toIdx }, cid: cid)
         }
         guard let did = displayID(forIdentifier: index.displays[dispIdx].identifier) else { return false }
-        moveCursor(to: CGPoint(x: CGDisplayBounds(did).midX, y: CGDisplayBounds(did).midY))
+        parkCursor(to: CGPoint(x: CGDisplayBounds(did).midX, y: CGDisplayBounds(did).midY))
         try? await Task.sleep(for: .milliseconds(300))
         var cur = liveIndex(dispIdx, cid) ?? -1
         var guardSteps = 0
@@ -483,6 +566,25 @@ public enum Carry {
         return hypot(cur.x - parked.x, cur.y - parked.y) > driftThreshold
     }
 
+    // #keeps-17 Q3: the interrupt contract on UNHELD legs. The held path measures drift against its parked
+    // hold point; the cross-display path holds nothing, so the brake is boundary sampling — remember where
+    // OUR last synthetic move left the cursor (or where the run found it) and treat further movement as the
+    // user's. Sampled between windows and before each irreversible AX-place, never mid-keystroke.
+    private static var expectedCursor: CGPoint?
+
+    /// Synthetic cursor move that keeps the interrupt reference honest — every carry-path `moveCursor` goes
+    /// through here so `userMoved()` only ever fires on REAL input.
+    private static func parkCursor(to p: CGPoint) {
+        moveCursor(to: p)
+        expectedCursor = p
+    }
+
+    /// Has the cursor moved beyond the drift threshold since we last placed (or observed) it?
+    private static func userMoved() -> Bool {
+        guard let expected = expectedCursor, let cur = cursorLocation() else { return false }
+        return hypot(cur.x - expected.x, cur.y - expected.y) > driftThreshold
+    }
+
     /// Hold the window using a derived grip profile. The Raycast-style close-button-top point is tried first;
     /// prototype offsets are fallback candidates when earlier geometry is unavailable or off-display. There is no
     /// pre-drag proof; the post-release membership check is the proof that the hold carried the target window.
@@ -502,7 +604,7 @@ public enum Carry {
 
         let candidate = candidates[0]
         let p = candidate.point
-        moveCursor(to: p)
+        parkCursor(to: p)
         try? await Task.sleep(for: .milliseconds(120))
         let parked = beginWindowGrab(at: p)
         try? await Task.sleep(for: .milliseconds(150))
