@@ -1,16 +1,32 @@
 # keeps-rbf
 
 A native macOS menu-bar app that remembers where every window lives in each of your monitor setups and
-puts them back when your setup changes — right display, right spot, right virtual desktop.
+puts them back when your setup changes — right display, right spot, and soon the right virtual desktop.
 
 A modern replacement for [Stay](https://cordlessdog.com/keeps/) (unmaintained since 2021), built because
 docking/undocking scatters windows onto the wrong displays and desktops, and re-placing ~17 windows by
 hand is enough friction to keep you chained to the desk.
 
-> **Status: early, in active development.** Layout **capture** and **silent restore of the windows on
-> your current desktop** both work — unit-tested and dogfooded. Bringing back windows on your *other*
-> desktops (Spaces) is the next slice. Solo-dogfooded on the author's machine — not yet something to
-> rely on. See [Status / roadmap](#status--roadmap).
+> **Status: early, in active development.** **Today:** layout capture and the silent restore of the
+> windows on your *current* desktop work — unit-tested and dogfooded daily. **Landing:** bringing back the
+> windows on your *other* desktops (Spaces) — a visible, one-tap carry that completes the whole-layout
+> restore — is built and passing automated tests, but not yet hand-tested in daily use. Solo project on
+> the author's machine — not yet something to rely on. See [Status / roadmap](#status--roadmap).
+
+## Quick start
+
+```sh
+swift build && ./.build/debug/keeps      # launches the menu-bar app (look for ▢ in the menu bar)
+```
+
+1. Click the menu-bar icon → **Save Workspace Layout** to remember where your windows are.
+2. Change your display setup (dock/undock, plug in a monitor).
+3. The windows on the desktop you're looking at **snap back on their own** — silent, automatic.
+4. If windows are stranded on other desktops, the app **offers a one-tap carry** — *"Bring back N windows
+   on other Spaces"* (a menu item; a notification too, once packaged). Click it and it visibly carries them home.
+
+That's the whole loop. *Why* the cross-desktop step has to be visible is just below; the full command list
+is under [Build & run](#build--run).
 
 ## The honest macOS constraint (the interesting part)
 
@@ -23,10 +39,12 @@ machine, prior art (`tplobo/restore-spaces`, killed at 14.5), and a deep researc
 **→ [The full investigation](docs/why-macos-window-restore-is-hard.md).**
 
 That one fact shapes the whole product: **cross-desktop restore cannot be invisible.** With SIP on (we
-never disable it), the only way to place a window on a background desktop is to *visibly* switch there and
-carry it (synthetic drag + ⌥⌘N). So keeps-rbf is **automatic but visible** — on a setup change it cycles
-desktops to put windows back: a brief on-screen ritual, not magic behind your back. We decided that's
-worth it; the manual re-placement it replaces is worse.
+never disable it), the only way to place a window on a background desktop is to *visibly* switch there
+while holding the window — we hold its title bar and drive your own macOS Space-switch shortcut, then drop
+it (no synthetic dragging). Because that takes over the cursor and flips desktops, keeps-rbf never springs
+it on you: the silent current-desktop restore runs automatically, and when windows remain on other desktops
+it **offers a one-tap carry** ("Bring back N windows on other Spaces") instead of hijacking your screen
+mid-task. You stay in control; the manual re-placement it replaces is worse.
 
 Display + position + size restore, by contrast, *is* silent (public Accessibility API) — that's the
 daily-drivable first slice.
@@ -40,8 +58,9 @@ daily-drivable first slice.
 - ✅ **Restore — display + position + size (current desktop)** — silent, automatic on a setup change,
   via public Accessibility; the daily-drivable slice. **Scope:** the windows on the desktop you're
   looking at — windows on *other* desktops (Spaces) aren't restored yet (Accessibility can't reach them)
-- ⏳ **Restore — other desktops (Spaces)** — a visible carry to bring back the windows not on your
-  current desktop, so the whole layout returns; the full hypothesis
+- 🔨 **Restore — other desktops (Spaces)** — a visible, one-tap carry ("Bring back N windows on other
+  Spaces") that brings back the windows not on your current desktop, so the whole layout returns;
+  **built + agent-tested, dogfood pending**
 - ⏳ **Triggers + reliability** — dock/undock/wake, ≥95% of windows within ~5s
 
 ## Build & run
@@ -52,9 +71,9 @@ Requires **macOS 14+** (developed on macOS 26) and **Swift 6**.
 swift build
 ./.build/debug/keeps --capture-once          # snapshot the current layout, print a summary
 ./.build/debug/keeps --restore-once          # dry-run: print what restore would do (moves nothing)
-./.build/debug/keeps --restore-once --apply  # restore the current setup's layout for real
+./.build/debug/keeps --restore-once --apply  # restore THIS desktop's windows for real (cross-desktop carry is the app's offer, not a flag)
 ./.build/debug/keeps --print                 # dump the snapshot JSON to stdout
-./.build/debug/keeps                          # run the menu-bar app: Save / Restore Workspace Layout
+./.build/debug/keeps                          # run the menu-bar app: Save / Restore Workspace Layout (+ one-tap carry offer)
 ```
 
 Snapshots are written one-per-setup to `~/Library/Application Support/com.rigelblu.keeps/configs/`.

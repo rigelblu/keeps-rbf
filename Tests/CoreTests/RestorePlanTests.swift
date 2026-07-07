@@ -166,6 +166,40 @@ import Testing
     #expect(Restore.decide(cap(sticky: true), match: m) == .skip(.sticky))
   }
 
+  @Test func carryDeferredSumsAllCarryOwnedReasons() {  // #keeps-17.3: the MVP offer's honest count
+    let r = Restore.Result(
+      planned: 0, applied: 0, failures: 0,
+      skips: [
+        .deferredBackground: 2, .deferredCrossDisplay: 1, .deferredWrongSpace: 1, .alreadyCorrect: 5,
+      ],
+      outcomes: [], dryRun: true, readFailed: false)
+    #expect(r.carryDeferred == 4)
+    #expect(r.deferredBackground == 2)
+  }
+
+  // #keeps-13 dogfood (2026-07-07): a visible window hand-moved to another Space keeps its frame — frame-only
+  // idempotence called it "correct" and the offer never saw it. Correctness is frame AND Space; a wrong-Space
+  // visible window is carry work (same-display held carry), whatever its frame.
+  @Test func reachableWrongSpaceRightFrameDefersToCarry() {
+    let m = match(currentSpace: "OTHER")  // frame matches capture; Space does not
+    #expect(Restore.decide(cap(), match: m) == .skip(.deferredWrongSpace))
+  }
+
+  @Test func reachableWrongSpaceWrongFrameDefersToCarry() {  // the carry places after the landing — fixes both
+    let m = match(liveFrame: WindowFrame(x: 0, y: 0, w: 800, h: 600), currentSpace: "OTHER")
+    #expect(Restore.decide(cap(), match: m) == .skip(.deferredWrongSpace))
+  }
+
+  @Test func reachableRightSpaceRightFrameStaysCorrect() {
+    let m = match(currentSpace: "S")
+    #expect(Restore.decide(cap(), match: m) == .skip(.alreadyCorrect))
+  }
+
+  @Test func stickyReachableWrongSpaceStaysFrameOnly() {  // no single home Space — frame-only, never deferred
+    let m = match(currentSpace: "OTHER")
+    #expect(Restore.decide(cap(sticky: true), match: m) == .skip(.alreadyCorrect))
+  }
+
   @Test func displayContainingUsesCenterRule() {  // the guard's landing resolution == the trace's displayOf rule
     let topo = Restore.Topology(displays: [
       .init(uuid: "A", bounds: CGRect(x: 0, y: 0, width: 1000, height: 1000), activeSpaceUUID: "SA"),

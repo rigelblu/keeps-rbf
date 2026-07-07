@@ -30,6 +30,7 @@ public enum Restore {
     case deferredCrossDisplay  // placing would cross displays onto a Space that isn't the window's captured one
     case offScreenTarget  // the desired frame resolves to no live display — placing lands unpredictably (#keeps-15 owns the repair)
     case unprovableSpace  // cross-display but no captured spaceUUID — can't prove Space safety, and the carry has no target
+    case deferredWrongSpace  // reachable but sitting on the wrong Space — silent AX can't move it there; same-display carry work (#keeps-13 dogfood)
   }
 
   enum Action: Equatable {
@@ -85,11 +86,20 @@ public enum Restore {
       }
       return .skip(cap.sticky ? .sticky : .deferredBackground)  // can't reach: #keeps-12, or all-spaces we can't touch
     }
-    // Reachable on an active desktop → frame-restore (display + position + size). The `sticky` flag gates only
-    // desktop-CARRY (#keeps-12), never frame-restore — and it's unreliable anyway (cgsSpacesForWindow over-reports
-    // Safari/others as all-spaces, #keeps-6), so it must not block placing a window we CAN reach. (dogfeel 2026-06-13)
+    // Reachable on an active desktop. Correctness is frame AND Space (#keeps-13 dogfood, 2026-07-07: a window
+    // hand-moved to another Space keeps its frame — frame-only idempotence called it "correct" and the offer
+    // never saw it). Space facts fail safe: unknown home/current ⇒ frame-only, the pre-#keeps-17 behavior.
+    // Sticky windows have no single home Space — frame-only for them too (the #keeps-6 over-report lesson:
+    // sticky must never block frame work, dogfeel 2026-06-13).
+    let spaceOK =
+      cap.sticky || cap.spaceUUID == nil || m.currentSpace == nil
+      || m.currentSpace == cap.spaceUUID
     if let lf = m.liveFrame, cap.frame.matches(lf, tolerance: tolerance) {
-      return .skip(.alreadyCorrect)
+      return spaceOK ? .skip(.alreadyCorrect) : .skip(.deferredWrongSpace)
+    }
+    if !spaceOK {
+      // Frame AND Space wrong — the carry fixes both (it AX-places after the verified landing).
+      return .skip(.deferredWrongSpace)
     }
     // #keeps-17: a silent place must never change the window's Space. Placing at coords no live display owns
     // lands wherever macOS clamps it — refuse (the repair is #keeps-15's display-relative model, not ours).
@@ -192,6 +202,13 @@ public enum Restore {
     public let dryRun: Bool
     public let readFailed: Bool  // cid == 0 — SkyLight read failed; nothing read or done (M4)
     public var deferredBackground: Int { skips[.deferredBackground] ?? 0 }  // the #keeps-12 handoff size
+    /// The carry-owned deferrals — background-Space windows, the #keeps-17 guard's cross-display ones, and
+    /// visible windows sitting on a wrong Space. The MVP offer's honest count (#keeps-17.3): everything a
+    /// tap can actually bring home, nothing more.
+    public var carryDeferred: Int {
+      (skips[.deferredBackground] ?? 0) + (skips[.deferredCrossDisplay] ?? 0)
+        + (skips[.deferredWrongSpace] ?? 0)
+    }
   }
 
   /// One captured window's restore decision — for the verbose log + future menu detail. `action` is "place"
@@ -348,13 +365,17 @@ public enum Restore {
     if let r = live.reachable[cap.cgWindowId] {
       let frame = live.existence.frames[cap.cgWindowId]
       let landing = live.topology.displayContaining(cap.frame)  // where an AX-set would land TODAY (#keeps-17)
+      // A reachable window sits on the ACTIVE Space of the display under its live frame — its current Space
+      // resolves from the topology, no extra CGS read (#keeps-13 dogfood: Space-aware idempotence needs it).
+      let current = frame.flatMap { live.topology.displayContaining($0) }
       return Match(
         reachable: true, minimized: r.minimized,
         liveSpaceCount: 1,  // don't-care when reachable; decide() gates on `reachable`
         liveFrame: frame,
-        currentDisplay: frame.flatMap { live.topology.displayContaining($0)?.uuid },
+        currentDisplay: current?.uuid,
         landingDisplay: landing?.uuid,
-        landingActiveSpace: landing?.activeSpaceUUID)
+        landingActiveSpace: landing?.activeSpaceUUID,
+        currentSpace: current?.activeSpaceUUID)
     }
     guard live.existence.ids.contains(cap.cgWindowId) else { return nil }  // not in .optionAll at all ⇒ gone
     let spaces = cgsSpacesForWindow(live.cid, cap.cgWindowId)
