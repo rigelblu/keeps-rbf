@@ -151,10 +151,12 @@ public enum Carry {
     }
 
     /// The skip reasons the carry owns (#keeps-17.3): windows silent restore deferred TO the carry — on a
-    /// background Space, or blocked by the cross-display Space guard. `unprovableSpace` and `offScreenTarget`
-    /// stay count-only: the carry can't resolve a target for them either.
+    /// background Space, blocked by the cross-display Space guard, or visible on a wrong Space (#keeps-13
+    /// dogfood). `unprovableSpace` and `offScreenTarget` stay count-only: the carry can't resolve a target
+    /// for them either.
     static func isCarryDeferred(_ action: Restore.Action) -> Bool {
         action == .skip(.deferredBackground) || action == .skip(.deferredCrossDisplay)
+            || action == .skip(.deferredWrongSpace)
     }
 
     /// The carry filter, as one pure function over the fresh deferred set + the live topology + the user's

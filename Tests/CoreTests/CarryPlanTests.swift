@@ -111,9 +111,10 @@ import Testing
     #expect(outcomes.map(\.rawValue).contains("axPlaceFailed"))
   }
 
-  @Test func carryOwnsBothDeferredReasons() {  // #keeps-17.3: the guard's cross-display deferrals join the set
+  @Test func carryOwnsAllDeferredReasons() {  // #keeps-17.3 + #keeps-13 dogfood: everything a tap can fix
     #expect(Carry.isCarryDeferred(.skip(.deferredBackground)))
     #expect(Carry.isCarryDeferred(.skip(.deferredCrossDisplay)))
+    #expect(Carry.isCarryDeferred(.skip(.deferredWrongSpace)))
     #expect(!Carry.isCarryDeferred(.skip(.unprovableSpace)))  // count-only: no resolvable carry target
     #expect(!Carry.isCarryDeferred(.skip(.offScreenTarget)))  // count-only: #keeps-15 owns the repair
     #expect(!Carry.isCarryDeferred(.skip(.alreadyCorrect)))
