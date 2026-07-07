@@ -57,6 +57,7 @@ public enum Restore {
     var currentDisplay: String? = nil  // live display under the window's current frame center (nil ⇒ unknown)
     var landingDisplay: String? = nil  // live display under the DESIRED frame center — where an AX-set would actually land; nil ⇒ off-screen
     var landingActiveSpace: String? = nil  // the landing display's active Space uuid (nil ⇒ unknown — treated as unprovable)
+    var currentSpace: String? = nil  // the window's own current Space uuid (#keeps-15 slice 2 — background idempotence); nil ⇒ unknown
   }
 
   /// The restore filter, as one pure function. Order matters: cheapest/most-decisive rejects first.
@@ -64,7 +65,19 @@ public enum Restore {
   static func decide(_ cap: CapturedWindow, match: Match?, tolerance: Int = 2) -> Action {
     guard let m = match else { return .skip(.gone) }  // no live window in .optionAll at all
     if m.minimized || m.liveSpaceCount == 0 { return .skip(.minimized) }  // 0-space = minimized/junk, NOT background (M1)
-    guard m.reachable else { return .skip(cap.sticky ? .sticky : .deferredBackground) }  // can't reach: #keeps-12, or all-spaces we can't touch
+    guard m.reachable else {
+      // #keeps-15 slice 2 (shipped early, v0.6.0): a background window that is already fully home — frame at
+      // its captured spot AND on its captured Space (macOS preserves membership across reconfigs) — is
+      // alreadyCorrect, not carry work. Without this every settled background window inflates the deferred
+      // count and the MVP offer lies ("Bring back 49" when the true number is 1 — Tom's 2026-07-06 dogfood).
+      // nil currentSpace ⇒ can't prove home ⇒ defer as before (fail-safe).
+      if !cap.sticky, let lf = m.liveFrame, cap.frame.matches(lf, tolerance: tolerance),
+        let home = cap.spaceUUID, m.currentSpace == home
+      {
+        return .skip(.alreadyCorrect)
+      }
+      return .skip(cap.sticky ? .sticky : .deferredBackground)  // can't reach: #keeps-12, or all-spaces we can't touch
+    }
     // Reachable on an active desktop → frame-restore (display + position + size). The `sticky` flag gates only
     // desktop-CARRY (#keeps-12), never frame-restore — and it's unreliable anyway (cgsSpacesForWindow over-reports
     // Safari/others as all-spaces, #keeps-6), so it must not block placing a window we CAN reach. (dogfeel 2026-06-13)
@@ -157,10 +170,7 @@ public enum Restore {
     CapturedWindow, Action
   )] {
     snapshot.windows.map { cap in
-      let match = matchFor(
-        cap, cid: live.cid, reachable: live.reachable, existence: live.existence,
-        topology: live.topology)
-      return (cap, decide(cap, match: match, tolerance: tolerance))
+      (cap, decide(cap, match: matchFor(cap, live: live), tolerance: tolerance))
     }
   }
 
@@ -327,26 +337,25 @@ public enum Restore {
   /// Lift one captured window's live state into a pure `Match` (nil ⇒ gone). The space lookup is lazy — done
   /// only for matched-but-not-reachable windows, where it discriminates a background desktop (1 space) from
   /// minimized/junk (0 spaces, the M1 fix) — never for the hundreds the reachable set already covers.
-  private static func matchFor(
-    _ cap: CapturedWindow, cid: CGSConnectionID,
-    reachable: [CGWindowID: Reachable], existence: Existence, topology: Topology
-  ) -> Match? {
-    if let r = reachable[cap.cgWindowId] {
-      let live = existence.frames[cap.cgWindowId]
-      let landing = topology.displayContaining(cap.frame)  // where an AX-set would land TODAY (#keeps-17)
+  private static func matchFor(_ cap: CapturedWindow, live: LiveState) -> Match? {
+    if let r = live.reachable[cap.cgWindowId] {
+      let frame = live.existence.frames[cap.cgWindowId]
+      let landing = live.topology.displayContaining(cap.frame)  // where an AX-set would land TODAY (#keeps-17)
       return Match(
         reachable: true, minimized: r.minimized,
         liveSpaceCount: 1,  // don't-care when reachable; decide() gates on `reachable`
-        liveFrame: live,
-        currentDisplay: live.flatMap { topology.displayContaining($0)?.uuid },
+        liveFrame: frame,
+        currentDisplay: frame.flatMap { live.topology.displayContaining($0)?.uuid },
         landingDisplay: landing?.uuid,
         landingActiveSpace: landing?.activeSpaceUUID)
     }
-    guard existence.ids.contains(cap.cgWindowId) else { return nil }  // not in .optionAll at all ⇒ gone
+    guard live.existence.ids.contains(cap.cgWindowId) else { return nil }  // not in .optionAll at all ⇒ gone
+    let spaces = cgsSpacesForWindow(live.cid, cap.cgWindowId)
     return Match(
       reachable: false, minimized: false,  // not-in-AX minimized is caught by the 0-space check
-      liveSpaceCount: cgsSpacesForWindow(cid, cap.cgWindowId).count,
-      liveFrame: existence.frames[cap.cgWindowId])  // guard facts stay nil — decide's guard sits on the place path only
+      liveSpaceCount: spaces.count,
+      liveFrame: live.existence.frames[cap.cgWindowId],  // #keeps-17 guard facts stay nil — the guard sits on the place path
+      currentSpace: spaces.first.flatMap { live.desktopIndex.uuid(ofManagedID: $0) })  // #keeps-15 slice 2
   }
 
   /// AX size→pos→size — defeats apps that move-on-resize and constraints that drop a lone trailing size-set
