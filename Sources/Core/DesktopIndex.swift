@@ -49,6 +49,18 @@ public struct DesktopIndex: Equatable {
     ordinal { $0.managedID == managedID }
   }
 
+  /// The stable uuid of the desktop with this live `ManagedSpaceID` — the #keeps-17 verify-after-place lens:
+  /// a landed window's cgsSpacesForWindow id, translated into the identity the captured spaceUUID speaks.
+  /// `nil` ⇒ unknown desktop (or one whose uuid CGS left empty — unknown, never "").
+  public func uuid(ofManagedID managedID: Int) -> String? {
+    for d in displays {
+      if let s = d.spaces.first(where: { $0.managedID == managedID }) {
+        return s.uuid.isEmpty ? nil : s.uuid
+      }
+    }
+    return nil
+  }
+
   /// Map a 1-based GLOBAL ordinal back to (display index, 0-based per-display index) — the navigation target:
   /// which display to step, and to which of its desktops. `nil` ⇒ out of range.
   public func locate(global: Int) -> (displayIndex: Int, perDisplayIndex: Int)? {
