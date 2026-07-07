@@ -133,15 +133,43 @@ public enum Restore {
     var failures = 0
     var skips: [SkipReason: Int] = [:]
     var outcomes: [Outcome] = []
+    let dbg = DebugTrace.enabled ? DebugTrace.activeDisplays() : []  // debug-only: name each frame's display
+    if DebugTrace.enabled {
+      DebugTrace.log(
+        "=== restore fp=\(snapshot.configFingerprint) apply=\(apply)\(DebugTrace.focusNote) — displays: "
+          + DebugTrace.displaysHeader(dbg))
+    }
     for (cap, action) in classify(snapshot, against: live, tolerance: tolerance) {
+      let before = DebugTrace.enabled ? live.existence.frames[cap.cgWindowId] : nil
       switch action {
       case .place(let frame):
         planned += 1
         if apply, let el = live.reachable[cap.cgWindowId]?.element {  // dry run, or lost the element, ⇒ count only
-          if setFrame(el, frame) { applied += 1 } else { failures += 1 }
+          let ok = setFrame(el, frame)
+          if ok { applied += 1 } else { failures += 1 }
+          if DebugTrace.enabled && DebugTrace.traces(bundleId: cap.bundleId, title: cap.title) {
+            DebugTrace.log(
+              DebugTrace.windowLine(
+                bundleId: cap.bundleId, title: cap.title, wid: cap.cgWindowId,
+                decision: ok ? "placed" : "place-FAILED(axSet)", desired: frame, before: before,
+                after: axFrame(el), displays: dbg))
+          }
+        } else if DebugTrace.enabled && DebugTrace.traces(bundleId: cap.bundleId, title: cap.title) {
+          DebugTrace.log(
+            DebugTrace.windowLine(
+              bundleId: cap.bundleId, title: cap.title, wid: cap.cgWindowId,
+              decision: "place(dry-run/no-element)", desired: frame, before: before, after: nil,
+              displays: dbg))
         }
       case .skip(let reason):
         skips[reason, default: 0] += 1
+        if DebugTrace.enabled && DebugTrace.traces(bundleId: cap.bundleId, title: cap.title) {
+          DebugTrace.log(
+            DebugTrace.windowLine(
+              bundleId: cap.bundleId, title: cap.title, wid: cap.cgWindowId,
+              decision: "skip:\(reason.rawValue)", desired: cap.frame, before: before, after: nil,
+              displays: dbg))
+        }
       }
       outcomes.append(
         Outcome(
@@ -234,6 +262,22 @@ public enum Restore {
     let posOK = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posV) == .success
     AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, sizeV)
     return posOK
+  }
+
+  /// Read a window's current AX frame (position + size) — debug-only, for the after-placement trace. Top-left
+  /// global coords, the same space as the captured frame, so a window that landed reads ≈ its desired frame.
+  static func axFrame(_ el: AXUIElement) -> WindowFrame? {
+    var posV: AnyObject?
+    var sizeV: AnyObject?
+    guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posV) == .success,
+      AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeV) == .success,
+      let posV, let sizeV
+    else { return nil }
+    var p = CGPoint.zero
+    var s = CGSize.zero
+    AXValueGetValue(posV as! AXValue, .cgPoint, &p)
+    AXValueGetValue(sizeV as! AXValue, .cgSize, &s)
+    return WindowFrame(x: Int(p.x), y: Int(p.y), w: Int(s.width), h: Int(s.height))
   }
 
   private static func frame(from info: [String: Any]) -> WindowFrame? {
