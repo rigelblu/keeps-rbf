@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- keeps.app bundle metadata (#keeps-18). The bundle id MUST stay com.rigelblu.keeps — the log
+     subsystem and the Application Support store dir are keyed on it, and the notification half
+     (main.swift, #keeps-13) arms itself off Bundle.main.bundleIdentifier. CFBundlePackageType=APPL
+     + CFBundleVersion are load-bearing for LaunchServices to treat the bundle as launchable. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.rigelblu.keeps</string>
+	<key>CFBundleName</key>
+	<string>keeps</string>
+	<key>CFBundleExecutable</key>
+	<string>keeps</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.8.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>
