@@ -237,6 +237,10 @@ public enum Carry {
         }
         let actions = plan(deferred: deferred, spaceIndex: index, shortcuts: shortcuts)
         let total = actions.reduce(0) { if case .carry = $1 { return $0 + 1 } else { return $0 } }
+        if DebugTrace.enabled {   // #keeps-15: carry header — the carry's view of the live arrangement (focus-noted)
+            DebugTrace.log("=== carry fp=\(snapshot.configFingerprint) apply=\(apply)\(DebugTrace.focusNote) — displays: "
+                + DebugTrace.displaysHeader(DebugTrace.activeDisplays()))
+        }
 
         var carried = 0, done = 0, abortedAfter = 0, aborted = false
         var skips: [CarrySkip: Int] = [:]
@@ -268,6 +272,12 @@ public enum Carry {
                     aborted = true; abortedAfter = carried
                     outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to, outcome: reason.rawValue))
                 }
+            }
+        }
+        if DebugTrace.enabled {   // #keeps-15: record EVERY carry outcome (incl. fail-closed) — the trace was blind to non-placements
+            for o in outcomes where DebugTrace.traces(bundleId: o.bundleId, title: o.title) {
+                DebugTrace.log("[carry:\(o.outcome)] \(o.bundleId) wid=\(o.cgWindowId) \"\(o.title ?? "")\""
+                    + " — desktop \(o.fromGlobal.map(String.init) ?? "?")→\(o.toGlobal.map(String.init) ?? "?")")
             }
         }
         return CarryResult(plannedCarries: total, carried: carried, skips: skips, aborted: aborted,
@@ -347,7 +357,18 @@ public enum Carry {
             return .failed(.membershipMismatch)
         }
         // 6) place display + position + size via public AX — the window is on the target desktop now (#keeps-3 path).
-        guard placeFrame(cap) else {
+        let placed = placeFrame(cap)
+        if DebugTrace.enabled && DebugTrace.traces(bundleId: cap.bundleId, title: cap.title) {
+            let displays = DebugTrace.activeDisplays()
+            let after = onScreenBounds(cap.cgWindowId).map {
+                WindowFrame(x: Int($0.minX), y: Int($0.minY), w: Int($0.width), h: Int($0.height))
+            }
+            DebugTrace.log(DebugTrace.windowLine(
+                bundleId: cap.bundleId, title: cap.title, wid: cap.cgWindowId,
+                decision: "carry→place \(placed ? "ok" : "FAILED(axSet)") (desktop \(toGlobal), landed=\(landedOn ?? -1))",
+                desired: cap.frame, before: nil, after: after, displays: displays))
+        }
+        guard placed else {
             log.info("carry wid=\(cap.cgWindowId) landedOn=\(landedOn ?? -1) target=\(toGlobal) axPlaced=false → axPlaceFailed")
             return .failed(.axPlaceFailed)
         }
