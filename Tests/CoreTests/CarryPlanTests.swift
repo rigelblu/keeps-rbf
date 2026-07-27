@@ -26,11 +26,12 @@ import Testing
       frame: WindowFrame(x: 0, y: 0, w: 800, h: 600), spaceIds: spaces,
       sticky: sticky, onScreen: false)
   }
-  private func deferred(_ space: String?, current: Int?, sticky: Bool = false, spaces: [Int] = [1])
-    -> Carry.DeferredWindow
+  private func deferred(_ space: String?, current: Int?, sticky: Bool = false, spaces: [Int] = [1],
+                        liveFrame: WindowFrame? = nil) -> Carry.DeferredWindow
   {
     Carry.DeferredWindow(
-      captured: cap(space, sticky: sticky, spaces: spaces), currentGlobalDesktop: current)
+      captured: cap(space, sticky: sticky, spaces: spaces), currentGlobalDesktop: current,
+      liveFrame: liveFrame)
   }
   private func binding() -> Shortcuts.Binding {
     Shortcuts.Binding(keyCode: 0, flags: [], isEnabled: true)
@@ -57,6 +58,53 @@ import Testing
 
   @Test func skipsAlreadyOnDesktop() {  // current == target → idempotent no-op
     #expect(plan(deferred("d0s4", current: 5), navAll()) == .skip(.alreadyOnDesktop, cap("d0s4")))
+  }
+
+  // MARK: #keeps-22 — same desktop is not "already home"; correctness is frame AND Space
+  //
+  // Restore counts a background window as carry work when its frame OR its Space is wrong. The carry used to
+  // skip on the Space alone, so a right-Space/wrong-size window was both counted (offer overpromised) and
+  // never repaired by anyone — restore can't reach a background window, and the carry walked past it.
+
+  @Test func placesWhenOnTargetDesktopButFrameDrifted() {
+    let drifted = WindowFrame(x: 400, y: 300, w: 800, h: 600)  // moved, same size
+    #expect(
+      plan(deferred("d0s4", current: 5, liveFrame: drifted), navAll())
+        == .placeOnly(cap("d0s4"), onGlobal: 5))
+  }
+
+  @Test func resizedOnTargetDesktopAlsoPlaces() {
+    let resized = WindowFrame(x: 0, y: 0, w: 1200, h: 900)  // same origin, different size
+    #expect(
+      plan(deferred("d0s4", current: 5, liveFrame: resized), navAll())
+        == .placeOnly(cap("d0s4"), onGlobal: 5))
+  }
+
+  @Test func matchingFrameOnTargetDesktopIsStillASkip() {  // the genuine no-op — nothing to do
+    let same = WindowFrame(x: 0, y: 0, w: 800, h: 600)
+    #expect(
+      plan(deferred("d0s4", current: 5, liveFrame: same), navAll())
+        == .skip(.alreadyOnDesktop, cap("d0s4")))
+  }
+
+  @Test func frameWithinToleranceIsNotDrift() {  // ±2px, same as Restore.decide — no rounding thrash
+    let jitter = WindowFrame(x: 2, y: -2, w: 798, h: 602)
+    #expect(
+      plan(deferred("d0s4", current: 5, liveFrame: jitter), navAll())
+        == .skip(.alreadyOnDesktop, cap("d0s4")))
+  }
+
+  @Test func unknownLiveFrameFailsSafeToSkip() {  // can't prove drift ⇒ don't move the user's screen
+    #expect(
+      plan(deferred("d0s4", current: 5, liveFrame: nil), navAll())
+        == .skip(.alreadyOnDesktop, cap("d0s4")))
+  }
+
+  @Test func placeStillNeedsTheDesktopNavigable() {  // placing means navigating the view there first
+    let drifted = WindowFrame(x: 400, y: 300, w: 800, h: 600)
+    #expect(  // global 17 is beyond ⌥⌘1…10 and stepping is unbound
+      plan(deferred("d1s4", current: 17, liveFrame: drifted), jumpsOnly())
+        == .skip(.unreachableShortcut, cap("d1s4")))
   }
 
   @Test func skipsTargetGoneWhenSpaceUUIDAbsent() {  // captured desktop deleted since capture

@@ -194,10 +194,10 @@
    var settleDebounce: Timer?  // coalesces the reconfig burst into one settle action once it's quiet
    var lastSettled: String?  // the config we last acted on — guards the sleep/wake spurious restore (#keeps-3)
    var pendingCarry: PendingCarry? {  // the live carry offer; nil ⇒ nothing stranded off-Space
-     didSet {
-       refreshAffordance()
-       if let p = pendingCarry, p != oldValue { notifyOffer(p) }  // #keeps-13: nudge once when a new offer is raised
-     }
+     // The badge always reflects the offer. The NUDGE does not: it is raised explicitly by the auto path only
+     // (#keeps-22) — see performRestore. A didSet can't tell a dock-in from a menu click, and that is the
+     // distinction that decides whether a notification is information or noise.
+     didSet { refreshAffordance() }
    }
    // #keeps-19: the in-flight signifier — while a carry runs, the run is the glyph's ONLY writer (isCarrying
    // guards every other writer, incl. tick()'s uncancellable deferred reset, checked at fire time) and the
@@ -353,7 +353,15 @@
          "restore (\(reason, privacy: .public)): placed \(r.applied)/\(r.planned), deferred \(r.carryDeferred), fp=\(fp, privacy: .public)"
        )
        noteRestore(r, reason)
-       pendingCarry = CarryAffordance.afterRestore(fingerprint: fp, deferred: r.carryDeferred)  // #keeps-13: offer the carry iff a tap can bring windows home (#keeps-17.3 honest count)
+       let raised = CarryAffordance.afterRestore(fingerprint: fp, deferred: r.carryDeferred)  // #keeps-13: offer the carry iff a tap can bring windows home (#keeps-17.3 honest count)
+       let isNewOffer = raised != nil && raised != pendingCarry
+       pendingCarry = raised
+       // #keeps-22: nudge on the AUTO path only. On a manual restore the click already IS consent (#keeps-16)
+       // and the carry starts ~66ms later, so the notification asks permission for work already underway and
+       // gets withdrawn ~1.5s on — unread, and invisible in Notification Center because the verdict removes it.
+       // Side benefit that matters more: every offer notification in the log is now a real dock-in nudge, which
+       // is exactly what #keeps-18's still-`unmeasured` learning bet needs in order to be answerable at all.
+       if reason != "manual", isNewOffer, let p = pendingCarry { notifyOffer(p) }
        tick("⟳")
      } catch {
        log.error("restore (\(reason, privacy: .public)) failed: \(error.localizedDescription)")

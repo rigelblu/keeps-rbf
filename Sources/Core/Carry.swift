@@ -34,8 +34,14 @@ public enum Carry {
     public struct DeferredWindow: Equatable {
         public let captured: CapturedWindow
         public let currentGlobalDesktop: Int?
-        public init(captured: CapturedWindow, currentGlobalDesktop: Int?) {
-            self.captured = captured; self.currentGlobalDesktop = currentGlobalDesktop
+        /// #keeps-22: the carry has to see the frame, not just the Space. Without it, `plan` skipped every
+        /// window already on its target desktop — including ones whose size/position had drifted, which
+        /// restore had counted as carry work. `nil` ⇒ unknown ⇒ treated as already-home (fail-safe).
+        public let liveFrame: WindowFrame?
+        public init(captured: CapturedWindow, currentGlobalDesktop: Int?, liveFrame: WindowFrame? = nil) {
+            self.captured = captured
+            self.currentGlobalDesktop = currentGlobalDesktop
+            self.liveFrame = liveFrame
         }
     }
 
@@ -58,6 +64,10 @@ public enum Carry {
 
     public enum CarryAction: Equatable {
         case carry(CapturedWindow, fromGlobal: Int, toGlobal: Int)
+        /// #keeps-22: already on its captured Space, but the frame drifted. No Space move — navigate the view
+        /// so AX can reach it, then place. Restore can't do this itself: a background-Space window is
+        /// unreachable, which is exactly why it lands in the deferred set.
+        case placeOnly(CapturedWindow, onGlobal: Int)
         case skip(CarrySkip, CapturedWindow)
     }
 
@@ -161,7 +171,10 @@ public enum Carry {
 
     /// The carry filter, as one pure function over the fresh deferred set + the live topology + the user's
     /// bindings. Order matters: target resolves → current resolves → not already there → both legs navigable.
-    public static func plan(deferred: [DeferredWindow], spaceIndex: DesktopIndex, shortcuts: Shortcuts) -> [CarryAction] {
+    /// `tolerance` must track `Restore.decide`'s default — the two classifiers deciding "already home"
+    /// differently is precisely the `#keeps-22` defect, so they compare frames the same way or not at all.
+    public static func plan(deferred: [DeferredWindow], spaceIndex: DesktopIndex, shortcuts: Shortcuts,
+                            tolerance: Int = 2) -> [CarryAction] {
         deferred.map { dw in
             let cap = dw.captured
             if cap.sticky || cap.spaceIds.count != 1 { return .skip(.stickyAllDesktops, cap) }
@@ -169,7 +182,17 @@ public enum Carry {
                 return .skip(.targetGone, cap)        // captured desktop no longer exists
             }
             guard let from = dw.currentGlobalDesktop else { return .skip(.gone, cap) }   // no live desktop
-            if from == to { return .skip(.alreadyOnDesktop, cap) }                       // already home (idempotent)
+            if from == to {
+                // #keeps-22: same desktop is NOT "already home" — correctness is frame AND Space, the same
+                // pair `Restore.decide` uses. Skipping on the Space alone both overstated the offer (restore
+                // counted these) and left the frame with no repair path at all: restore can't reach a
+                // background window, and the carry walked past it. Unknown live frame ⇒ can't prove drift ⇒ skip.
+                guard let lf = dw.liveFrame, !cap.frame.matches(lf, tolerance: tolerance) else {
+                    return .skip(.alreadyOnDesktop, cap)
+                }
+                guard navigable(to, shortcuts) else { return .skip(.unreachableShortcut, cap) }
+                return .placeOnly(cap, onGlobal: to)
+            }
             guard navigable(to, shortcuts), navigable(from, shortcuts) else {
                 return .skip(.unreachableShortcut, cap)   // can't reach to grab it, or can't reach its target
             }
@@ -244,10 +267,14 @@ public enum Carry {
         let deferred: [DeferredWindow] = Restore.classify(snapshot, against: live).compactMap { (cap, action) in
             guard isCarryDeferred(action) else { return nil }
             let currentMid = cgsSpacesForWindow(cid, cap.cgWindowId).first
-            return DeferredWindow(captured: cap, currentGlobalDesktop: currentMid.flatMap { index.globalOrdinal(ofManagedID: $0) })
+            return DeferredWindow(captured: cap,
+                                  currentGlobalDesktop: currentMid.flatMap { index.globalOrdinal(ofManagedID: $0) },
+                                  liveFrame: live.existence.frames[cap.cgWindowId])  // #keeps-22
         }
         let actions = plan(deferred: deferred, spaceIndex: index, shortcuts: shortcuts)
-        let total = actions.reduce(0) { if case .carry = $1 { return $0 + 1 } else { return $0 } }
+        let total = actions.reduce(0) {   // #keeps-22: a place is work too — it counts toward progress
+            switch $1 { case .carry, .placeOnly: return $0 + 1; case .skip: return $0 }
+        }
         if DebugTrace.enabled {   // #keeps-15: carry header — the carry's view of the live arrangement (focus-noted)
             DebugTrace.log("=== carry fp=\(snapshot.configFingerprint) apply=\(apply)\(DebugTrace.focusNote) — displays: "
                 + DebugTrace.displaysHeader(DebugTrace.activeDisplays()))
@@ -265,6 +292,32 @@ public enum Carry {
                 // captured spaceUUID — so a verbose line reads `desktop 5→5 (alreadyOnDesktop)`, not `?→?`.
                 let to = cap.spaceUUID.flatMap { index.globalOrdinal(ofSpaceUUID: $0) }
                 outcomes.append(Outcome(cap: cap, fromGlobal: dw.currentGlobalDesktop, toGlobal: to, outcome: reason.rawValue))
+            case .placeOnly(let cap, let on):
+                // #keeps-22: same shape as a carry (progress, dry-run, interrupt boundary) minus the Space
+                // move. Counts as carried — from the user's side the window did come home; only the drift
+                // being size-not-Space is an implementation detail.
+                done += 1
+                onProgress(Progress(done: done, total: total, toDesktop: on, bundleId: cap.bundleId))
+                guard apply, !aborted else {
+                    outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on,
+                                            outcome: apply ? "skipped (aborted)" : "would-place"))
+                    continue
+                }
+                if userMoved() {
+                    aborted = true; abortedAfter = carried
+                    skips[.userInterrupt, default: 0] += 1
+                    outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on,
+                                            outcome: CarrySkip.userInterrupt.rawValue))
+                    continue
+                }
+                switch await executePlaceOnly(cap, onGlobal: on, index: index, shortcuts: shortcuts, cid: cid) {
+                case .carried:
+                    carried += 1
+                    outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on, outcome: "placed"))
+                case .failed(let reason), .aborted(let reason):
+                    skips[reason, default: 0] += 1
+                    outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on, outcome: reason.rawValue))
+                }
             case .carry(let cap, let from, let to):
                 done += 1
                 onProgress(Progress(done: done, total: total, toDesktop: to, bundleId: cap.bundleId))
@@ -308,6 +361,31 @@ public enum Carry {
 
     private enum CarryOutcome { case carried, failed(CarrySkip), aborted(CarrySkip) }
     private static let driftThreshold: CGFloat = 12   // px a parked cursor may wander before we call it real input
+
+    /// #keeps-22: the window is already on its captured Space; only its frame drifted. Restore can't repair
+    /// that — a background-Space window is unreachable by AX, which is why it was deferred here in the first
+    /// place. So: navigate the VIEW to that desktop (making it reachable), raise, place. Deliberately NOT a
+    /// carry — no grab, no Space switch, and no membership verification, because the Space never changes.
+    private static func executePlaceOnly(_ cap: CapturedWindow, onGlobal: Int, index: DesktopIndex,
+                                         shortcuts: Shortcuts, cid: CGSConnectionID) async -> CarryOutcome {
+        log.info("place wid=\(cap.cgWindowId) \(cap.bundleId, privacy: .public) on=\(onGlobal) (frame drift, no Space move)")
+        guard await navigateView(toGlobal: onGlobal, index: index, shortcuts: shortcuts, cid: cid) else {
+            log.info("place wid=\(cap.cgWindowId) FAILED nav: couldn't reach \(onGlobal)")
+            return .failed(.unreachableShortcut)
+        }
+        _ = raiseWindow(cap)
+        try? await Task.sleep(for: .milliseconds(350))
+        guard onScreenBounds(cap.cgWindowId) != nil else {
+            log.info("place wid=\(cap.cgWindowId) FAILED: not on screen after nav to \(onGlobal)")
+            return .failed(.gone)
+        }
+        guard placeFrame(cap) else {
+            log.info("place wid=\(cap.cgWindowId) axPlaced=false → axPlaceFailed")
+            return .failed(.axPlaceFailed)
+        }
+        log.info("place wid=\(cap.cgWindowId) on=\(onGlobal) axPlaced=true → PLACED")
+        return .carried
+    }
 
     private static func executeCarry(_ cap: CapturedWindow, fromGlobal: Int, toGlobal: Int,
                                      index: DesktopIndex, shortcuts: Shortcuts, cid: CGSConnectionID) async -> CarryOutcome {
