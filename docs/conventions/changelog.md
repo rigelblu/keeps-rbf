@@ -5,6 +5,8 @@ title: Changelog
 # 🔵⋯ Convention
 Document only user-facing changes for this product. For technical products (APIs, platforms, dotfiles), developers are the end-users. Skip churn and internal-only work.
 
+**What a version heading means here (v0.x).** keeps is dogfood-first — one user, one machine. A `v0.x.y` section records a built and dogfooded slice; it is **not** a declaration that the version was distributed to anyone. Distribution is a `v1.0.0` concern, so the ship plan's `Recently Released` and `product-ship-released.md` stay empty by design until then. Don't read the version sections below as a release history.
+
 **Filter out:** drop entries that don't carry user value — internal refactors, no-impact bumps, churn. If it wouldn't match `vcs-change-summary product` framing, it doesn't belong here.
 
 **Entry format:** use skill `vcs-change-summary product`. Prefix each entry with today's date:
