@@ -17,8 +17,21 @@ hand is enough friction to keep you chained to the desk.
 ## Quick start
 
 ```sh
+bash scripts/package-dmg.sh                            # build an installable image → .build/keeps-<version>.dmg
+open .build/keeps-*.dmg                                # then drag keeps to Applications, like any Mac app
+```
+
+Prefer to run it straight from the build directory? That works too:
+
+```sh
 bash scripts/package-app.sh && open .build/keeps.app   # build, sign, launch (look for ▢ in the menu bar)
 ```
+
+> **On the image you just built:** `package-dmg.sh` signs with whatever certificate is on *your* machine and
+> prints an honest STATUS line saying whether the result can open on anyone else's Mac. Signed with an Apple
+> Development certificate it installs fine for you and Gatekeeper **blocks it everywhere else** — notarization
+> requires a Developer ID certificate, so this is a hard wall, not a flag you can flip. The script climbs to a
+> genuinely distributable image the moment such a certificate exists.
 
 1. Click the menu-bar icon → **Save Window Layouts & Spaces** (⌘S) to remember where your windows are.
    keeps remembers one layout *per display setup* — docked and undocked each get their own memory.
@@ -95,8 +108,12 @@ capture-on-stable lands; Stage Manager is untested.
 Requires **macOS 14+** (developed on macOS 26) and **Swift 6**.
 
 ```sh
+swift build                                   # plain binary at .build/debug/keeps (no bundle id ⇒ no notifications)
+swift test                                    # the unit suite — see the note below on reading its output
+
 bash scripts/package-app.sh                   # build + assemble + codesign .build/keeps.app (debug|release)
 open .build/keeps.app                         # run it as a real app (notifications live)
+bash scripts/package-dmg.sh                   # wrap that bundle in a drag-to-Applications .dmg
 
 # CLI verification surface (same binary; works unbundled via `swift build` too):
 ./.build/keeps.app/Contents/MacOS/keeps --capture-once          # snapshot the current layout, print a summary
@@ -104,7 +121,29 @@ open .build/keeps.app                         # run it as a real app (notificati
 ./.build/keeps.app/Contents/MacOS/keeps --restore-once --apply  # silently restore this Space's windows for real
 ./.build/keeps.app/Contents/MacOS/keeps --carry-once            # dry-run the cross-Space carry plan
 ./.build/keeps.app/Contents/MacOS/keeps --print                 # dump the snapshot JSON to stdout
+./.build/keeps.app/Contents/MacOS/keeps --watch                 # log each display-reconfig event live
 ```
+
+**Reading `swift test` output.** The suite is written against **swift-testing**, not XCTest — so every run also
+prints XCTest's own summary, `Executed 0 tests, with 0 failures`. That line is truthful (there are no XCTest
+tests) and completely misleading. The real result is:
+
+```
+􁁛  Test run with 115 tests passed after 0.018 seconds.
+```
+
+Trust the exit code and that line. Anything grepping for `Executed N tests` will build a green dashboard that
+can never show a test.
+
+**Dogfooding with the trace armed:**
+
+```sh
+bash scripts/keeps-relaunch-armed.sh          # relaunch the signed bundle with KEEPS_DEBUG set
+```
+
+Run that **from your own terminal**, never from an agent shell or an embedded one. macOS attributes
+Accessibility trust to the *launching* app, so keeps launched from a shell that has no AX grant comes up unable
+to read or move a single window — and it will look like a keeps bug rather than a launch problem.
 
 Snapshots are written one-per-setup to `~/Library/Application Support/com.rigelblu.keeps/configs/`.
 Capture needs no special permission; window *titles* require Screen Recording (optional). **Restore**
