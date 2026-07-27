@@ -31,7 +31,11 @@ public enum CarrySignifier {
   /// The completion-notification body. Every reachable (aborted, carried, planned) state has honest copy —
   /// partial non-aborted runs are common (.failed outcomes don't set aborted), so they never wear "success".
   public static func verdictBody(carried: Int, planned: Int, aborted: Bool) -> String {
-    if aborted { return "Stopped — \(carried) of \(planned) windows brought back" }
+    // #keeps-21: this branch was the one place the "counts agree at N=1" rule below was broken —
+    // a single-candidate abort read "0 of 1 windows". Pluralize on `planned`, the noun being counted.
+    if aborted {
+      return "Stopped — \(carried) of \(planned) window\(planned == 1 ? "" : "s") brought back"
+    }
     if planned == 0 { return "Everything was already in place" }
     if carried == 0 {
       return planned == 1
