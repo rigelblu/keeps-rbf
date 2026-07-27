@@ -57,9 +57,15 @@ import Testing
     #expect(
       CarrySignifier.verdictBody(carried: 2, planned: 5, aborted: true)
         == "Stopped — 2 of 5 windows brought back")
-    #expect(  // an abort before the first window still reads naturally
+    // #keeps-21: this case used to assert "0 of 1 windows" — the expectation itself was the bug, so a
+    // green suite endorsed copy that violated the file's own "counts agree at N=1" rule. Caught only by
+    // a human reading a real banner (2026-07-27). Both N=1 aborts are pinned now.
+    #expect(
       CarrySignifier.verdictBody(carried: 0, planned: 1, aborted: true)
-        == "Stopped — 0 of 1 windows brought back")
+        == "Stopped — 0 of 1 window brought back")
+    #expect(
+      CarrySignifier.verdictBody(carried: 1, planned: 1, aborted: true)
+        == "Stopped — 1 of 1 window brought back")
   }
 
   @Test func noneCarriedIsAFailureNotASkipCount() {  // "skipped" would conflate already-home with failure
