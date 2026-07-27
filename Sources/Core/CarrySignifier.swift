@@ -18,8 +18,13 @@ public enum CarrySignifier {
 
   // MARK: - Offer copy (the #keeps-13 nudge, trued: fact body, count-aware action)
 
+  /// #keeps-22: this used to read "N windows are on other Spaces" — literally true and still misleading.
+  /// The count sums `deferredBackground + deferredCrossDisplay + deferredWrongSpace`, and only the last
+  /// means *wrong* Space; the first just means *a Space you aren't looking at*, which is often exactly where
+  /// the window belongs with only its size adrift. Naming the location made a correct window sound misplaced,
+  /// and would read as an outright lie once the carry started fixing size-only drift. Name the problem instead.
   public static func offerBody(count: Int) -> String {
-    count == 1 ? "1 window is on another Space" : "\(count) windows are on other Spaces"
+    count == 1 ? "1 window isn't where you left it" : "\(count) windows aren't where you left them"
   }
 
   public static func offerActionTitle(count: Int) -> String {
@@ -43,8 +48,11 @@ public enum CarrySignifier {
         : "Couldn't bring windows back — none of \(planned) moved"
     }
     if carried < planned { return "\(carried) of \(planned) windows brought back" }
-    return carried == 1
-      ? "1 window brought back to its Space"
-      : "\(carried) windows brought back to their Spaces"
+    // #keeps-22: was "brought back to its Space" — location-naming, and now sometimes false since a run may
+    // fix only a window's size with no Space change. Briefly "brought back where you left it", which rhymed
+    // with the offer's "aren't where you left them" — and on an ABORTED run both banners sit in Notification
+    // Center together, where two near-identical sentences blur. Bare "brought back" echoes the action button
+    // the user actually pressed ("Bring them back") and matches the partial/aborted forms above.
+    return carried == 1 ? "1 window brought back" : "\(carried) windows brought back"
   }
 }

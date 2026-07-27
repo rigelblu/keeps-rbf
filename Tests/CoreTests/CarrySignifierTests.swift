@@ -27,8 +27,10 @@ import Testing
   // MARK: Offer copy — fact body, count-aware action (the two #keeps-18 banner findings)
 
   @Test func offerBodyStatesTheFactNoQuestionMark() {
-    #expect(CarrySignifier.offerBody(count: 1) == "1 window is on another Space")
-    #expect(CarrySignifier.offerBody(count: 4) == "4 windows are on other Spaces")
+    // #keeps-22: names the problem, not the location. "on other Spaces" was true of every counted window
+    // and misleading about most of them — `deferredBackground` only means "a Space you aren't looking at".
+    #expect(CarrySignifier.offerBody(count: 1) == "1 window isn't where you left it")
+    #expect(CarrySignifier.offerBody(count: 4) == "4 windows aren't where you left them")
   }
 
   @Test func offerActionTitleIsCountAware() {
@@ -41,10 +43,11 @@ import Testing
   @Test func cleanRunSaysBroughtBack() {
     #expect(
       CarrySignifier.verdictBody(carried: 3, planned: 3, aborted: false)
-        == "3 windows brought back to their Spaces")
-    #expect(
+        == "3 windows brought back")
+    #expect(  // #keeps-22: not "to its Space" (a run may fix only size), and not "where you left them" —
+      // that rhymed with the offer body, and on an aborted run both banners are on screen together
       CarrySignifier.verdictBody(carried: 1, planned: 1, aborted: false)
-        == "1 window brought back to its Space")
+        == "1 window brought back")
   }
 
   @Test func partialNonAbortedNeverWearsSuccessCopy() {  // the review's major: .failed outcomes don't set aborted
