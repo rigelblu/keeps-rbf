@@ -554,6 +554,33 @@
              options: [.foreground])
          ], intentIdentifiers: [], options: []),
      ])
+     // #keeps-20: report the STANDING authorization without prompting for it. `.notDetermined`, `.denied`, and
+     // `.authorized`-with-alerts-off are three different faults needing three different fixes — and every one of
+     // them used to present as the same evidence: no banner, no log line, nothing.
+     center.getNotificationSettings { [weak self] s in
+       self?.noteNotify(
+         "settings: authorization=\(Self.authName(s.authorizationStatus))"
+           + " alert=\(s.alertSetting.rawValue) notificationCenter=\(s.notificationCenterSetting.rawValue)")
+     }
+   }
+
+   // #keeps-20: the notification path used to fail in total silence — two `guard granted else { return }` sites
+   // plus two error-discarding `add()` calls meant "nothing was warranted" and "delivery is broken" produced
+   // identical evidence. Every outcome now names itself, in the unified log and the KEEPS_DEBUG trace alike.
+   private func noteNotify(_ line: String) {
+     log.info("notifications: \(line, privacy: .public)")
+     DebugTrace.log("[notify] " + line)
+   }
+
+   private static func authName(_ s: UNAuthorizationStatus) -> String {
+     switch s {
+     case .notDetermined: return "notDetermined"
+     case .denied: return "denied"
+     case .authorized: return "authorized"
+     case .provisional: return "provisional"
+     case .ephemeral: return "ephemeral"
+     @unknown default: return "unknown(\(s.rawValue))"
+     }
    }
 
    // Post (or replace) the carry nudge for a freshly-raised offer. Reuses one notification id so a new offer
@@ -561,14 +588,19 @@
    // #keeps-19 copy: the body states the fact; the action button is the question (CarrySignifier owns the words).
    private func notifyOffer(_ p: PendingCarry) {
      guard notificationsAvailable else { return }  // the menu item carries the offer on unbundled builds
-     UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
-       guard granted else { return }
+     UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] granted, err in
+       if let err { self?.noteNotify("offer: authorization failed — \(err.localizedDescription)") }
+       guard granted else { self?.noteNotify("offer: not authorized — nothing posted"); return }
        let content = UNMutableNotificationContent()
        content.title = "keeps"
        content.body = CarrySignifier.offerBody(count: p.count)
        content.categoryIdentifier = p.count == 1 ? Self.carryCategoryOneID : Self.carryCategoryManyID
        UNUserNotificationCenter.current().add(
-         UNNotificationRequest(identifier: Self.offerNotificationID, content: content, trigger: nil))
+         UNNotificationRequest(identifier: Self.offerNotificationID, content: content, trigger: nil)
+       ) { addErr in
+         self?.noteNotify(
+           addErr.map { "offer: add failed — \($0.localizedDescription)" } ?? "offer: posted (\(p.count))")
+       }
      }
    }
 
@@ -578,8 +610,9 @@
    private func notifyVerdict(_ r: Carry.CarryResult) {
      guard notificationsAvailable else { return }  // the status line carries the verdict on unbundled builds
      let offerStands = pendingCarry != nil
-     UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
-       guard granted else { return }
+     UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] granted, err in
+       if let err { self?.noteNotify("verdict: authorization failed — \(err.localizedDescription)") }
+       guard granted else { self?.noteNotify("verdict: not authorized — nothing posted"); return }
        let center = UNUserNotificationCenter.current()
        if !offerStands {
          center.removeDeliveredNotifications(withIdentifiers: [Self.offerNotificationID])
@@ -589,7 +622,12 @@
        content.body = CarrySignifier.verdictBody(
          carried: r.carried, planned: r.plannedCarries, aborted: r.aborted)
        center.add(
-         UNNotificationRequest(identifier: Self.verdictNotificationID, content: content, trigger: nil))
+         UNNotificationRequest(identifier: Self.verdictNotificationID, content: content, trigger: nil)
+       ) { addErr in
+         self?.noteNotify(
+           addErr.map { "verdict: add failed — \($0.localizedDescription)" }
+             ?? "verdict: posted — \(content.body)")
+       }
      }
    }
 
