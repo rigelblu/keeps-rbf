@@ -241,6 +241,10 @@ public enum Carry {
         public let dryRun: Bool
         public let readFailed: Bool      // cid == 0 — nothing read or done (M4)
         public let navigationDead: Bool  // no Switch-to-Desktop AND no Move-a-space bound — can't navigate at all
+        // #keeps-5: snapshot predates this boot ⇒ every cgWindowId in it is churned. Refused whole, before any
+        // window is touched — the carry reaches windows via Restore.classify, NOT Restore.restore, so it needs
+        // its own gate rather than inheriting one. Same shape as readFailed/navigationDead: an honest stop.
+        public var staleSession: Bool = false
         public var skipped: Int { skips.values.reduce(0, +) }
     }
 
@@ -255,6 +259,18 @@ public enum Carry {
             return CarryResult(plannedCarries: 0, carried: 0, skips: [:], aborted: false, abortedAfter: 0,
                                outcomes: [], dryRun: !apply, readFailed: true, navigationDead: false)
         }
+        // #keeps-5.4: same story as restore — a prior-session snapshot means the ids need resolving by
+        // app+position, not that the run is refused. Refusal survives only when nothing resolves at all.
+        var remap: [CGWindowID: CGWindowID]? = nil  // nil ⇒ same session, ids are trustworthy
+        if !SessionFreshness.isCurrent(snapshot) {
+            remap = Restore.coldStartRemap(snapshot, live: live)
+            DebugTrace.log("=== carry COLD START — resolved \(remap?.count ?? 0)/\(snapshot.windows.count) windows by app+position")
+            guard !(remap ?? [:]).isEmpty else {
+                return CarryResult(plannedCarries: 0, carried: 0, skips: [:], aborted: false, abortedAfter: 0,
+                                   outcomes: [], dryRun: !apply, readFailed: false, navigationDead: false,
+                                   staleSession: true)
+            }
+        }
         let cid = live.cid
         let index = DesktopIndex.live(cid)
         let shortcuts = Shortcuts.live()
@@ -266,8 +282,20 @@ public enum Carry {
         // Fresh deferred set (Blocker-1): keep the carry-owned deferrals — background-Space windows AND the
         // #keeps-17 guard's cross-display ones — each paired with its CURRENT live desktop (the int
         // ManagedSpaceID cgsSpacesForWindow returns → global ordinal).
-        let deferred: [DeferredWindow] = Restore.classify(snapshot, against: live).compactMap { (cap, action) in
+        let deferred: [DeferredWindow] = Restore.classify(snapshot, against: live, remap: remap).compactMap { (cap, action) in
             guard isCarryDeferred(action) else { return nil }
+            // #keeps-5.4: substitute the resolved live id INTO the captured record, once, here. The execute
+            // path reads `cap.cgWindowId` at ~20 sites (raise, grab, bounds, membership poll, restitution);
+            // rewriting the id at construction makes every one of them address the window that actually
+            // exists, with no per-site edits to get wrong. Everything else on the record — bundleId, frame,
+            // spaceUUID — stays exactly as captured, because those are the TARGET, not the lookup key.
+            // Resolve or SKIP — never fall back to the dead id. Same rule, same reason as `matchFor`: a
+            // recycled id would hand this carry a stranger's window to grab and drag across Spaces.
+            var cap = cap
+            if let remap {
+                guard let resolved = remap[cap.cgWindowId] else { return nil }
+                cap.cgWindowId = resolved
+            }
             let currentMid = cgsSpacesForWindow(cid, cap.cgWindowId).first
             return DeferredWindow(captured: cap,
                                   currentGlobalDesktop: currentMid.flatMap { index.globalOrdinal(ofManagedID: $0) },
@@ -755,12 +783,20 @@ public enum Carry {
             log.info("raise wid=\(cap.cgWindowId) failed: no AX element for pid=\(cap.pid) bundle=\(cap.bundleId, privacy: .public)")
             return false
         }
-        let activated = NSRunningApplication(processIdentifier: pid_t(cap.pid))?.activate() ?? false
+        // #keeps-5.4: activate the app that OWNS THE ELEMENT we are about to raise, never `cap.pid`. A
+        // captured pid is session-scoped like the window id — after a reboot it belongs to some unrelated
+        // process, so activating it would steal focus to an arbitrary app mid-carry and make `targetPid=` a
+        // lie in the log. Asking the element removes the possibility of the two disagreeing at all.
+        var livePid: pid_t = 0
+        let activated =
+            AXUIElementGetPid(el, &livePid) == .success
+            ? (NSRunningApplication(processIdentifier: livePid)?.activate() ?? false)
+            : false
         AXUIElementSetAttributeValue(el, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(el, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         AXUIElementPerformAction(el, kAXRaiseAction as CFString)
         let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1
-        log.info("raise wid=\(cap.cgWindowId) activated=\(activated) frontmostPid=\(frontmost) targetPid=\(cap.pid)")
+        log.info("raise wid=\(cap.cgWindowId) activated=\(activated) frontmostPid=\(frontmost) targetPid=\(livePid)")
         return true
     }
 

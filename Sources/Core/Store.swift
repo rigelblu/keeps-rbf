@@ -38,6 +38,20 @@ public struct Store {
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     encoder.dateEncodingStrategy = .iso8601
     let dest = url(for: snapshot.configFingerprint)
+    // #keeps-5.4 (review C2): keep ONE previous copy before overwriting. Save was a plain atomic overwrite
+    // with no history, which made every Save a potential permanent loss of the layout the user was trying to
+    // get back — and for a while keeps actively RECOMMENDED that click after a reboot. Restoring a layout is
+    // recoverable by re-arranging windows; a destroyed snapshot is not, so the two errors are not symmetric
+    // and the cheap insurance is worth its five lines.
+    //
+    // Best-effort by design: a failed backup must never block the save the user asked for. The file is
+    // `<fingerprint>.previous.json`, which `exists`/`load` can never pick up — they key on the bare
+    // fingerprint, and `isValidFingerprint` rejects anything with a dot in it.
+    if FileManager.default.fileExists(atPath: dest.path) {
+      let previous = directory.appendingPathComponent("\(snapshot.configFingerprint).previous.json")
+      try? FileManager.default.removeItem(at: previous)
+      try? FileManager.default.copyItem(at: dest, to: previous)
+    }
     try encoder.encode(snapshot).write(to: dest, options: .atomic)  // temp file + rename under the hood
     return dest
   }

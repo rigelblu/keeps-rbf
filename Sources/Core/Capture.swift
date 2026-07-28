@@ -155,10 +155,14 @@ public enum Capture {
     }
   }
 
+  /// #keeps-5: the `bundleIdentifier ?? "pid:<pid>"` rule moved to `AppIdentity` so restore's identity guard
+  /// compares against the SAME encoding this writes, by calling the same function rather than re-deriving it.
+  /// Two copies of one rule is how a guard starts rejecting a window for being itself.
   private static func regularAppPIDs() -> [pid_t: String] {
     var map: [pid_t: String] = [:]
     for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
-      map[app.processIdentifier] = app.bundleIdentifier ?? "pid:\(app.processIdentifier)"
+      map[app.processIdentifier] = AppIdentity.encode(
+        bundleId: app.bundleIdentifier, pid: app.processIdentifier)
     }
     return map
   }

@@ -32,9 +32,57 @@ import Testing
     }
   }
 
-  @Test func exactlyOneStateCanBeFixedInApp() {
-    let inApp = StandingCondition.allCases.filter(\.keepsCanFixItself)
-    #expect(inApp == [.notificationsNotAsked])
+  @Test func fixableInAppMeansTheRemedyNeverLeavesTheApp() {
+    // Was `exactlyOneStateCanBeFixedInApp`, asserting the set equals [.notificationsNotAsked]. That was an
+    // ENUMERATION SNAPSHOT, not a property: it was true only because one state happened to be in-app, so
+    // #keeps-5's `.fixInApp` (a stale snapshot — keeps runs Save itself, no OS involved) broke it correctly.
+    //
+    // Rewritten as the property it was always standing in for, per this feature's own review lesson (#keeps-20
+    // finding #5): a test named for a guarantee should assert the guarantee. The list would have needed
+    // editing on every future state; the property will not.
+    for c in StandingCondition.allCases {
+      switch c.remedy {
+      case .promptInApp, .fixInApp:
+        #expect(c.keepsCanFixItself, "\(c): remedy stays in-app, so keeps must claim it can fix it")
+      case .openSettings:
+        #expect(!c.keepsCanFixItself, "\(c): only Settings can clear it — keeps must not claim otherwise")
+      }
+    }
+  }
+
+  @Test func theTwoInAppRemediesAreNotInterchangeable() {
+    // #keeps-5 added a third remedy rather than widening `.promptInApp`, because the two differ in a way the
+    // user feels: an OS authorization dialog can REFUSE, and running Save cannot. Collapsing them would put a
+    // label on the stale-snapshot line that promises something an OS prompt might not deliver.
+    #expect(StandingCondition.notificationsNotAsked.remedy == .promptInApp)
+    #expect(StandingCondition.savedLayoutUnmatchable.remedy == .fixInApp)
+    #expect(StandingCondition.notificationsNotAsked.remedy != StandingCondition.savedLayoutUnmatchable.remedy)
+  }
+
+  @Test func severityRanksByHowMuchIsBrokenRightNow() {
+    // Severity is user-facing: the top line is the one read first, so the order encodes urgency, not
+    // category. Reading down: keeps can't move a window at all → can't reach you → won't act on a memory it
+    // can't trust (this session) → won't come back by itself (next session). The last is deliberately
+    // LOWEST: keeps is working fine right now, it just may not be here after a reboot.
+    //
+    // Written as the explicit expected order. The first draft asserted "everything outranks the stale line",
+    // which was only true while that line happened to be last — `loginItemBlocked` broke it immediately.
+    // Pinning the order says what we mean; pinning a superlative says what was accidentally true.
+    let expected: [StandingCondition] = [
+      .accessibilityOff,  // 0 — keeps does nothing at all
+      .notificationsNotAsked, .notificationsDenied, .notificationBannersOff,  // 1 — can't reach you
+      .savedLayoutUnmatchable,  // 2 — declines to act, this session
+      .loginItemBlocked,  // 3 — may not be running next session
+    ]
+    #expect(
+      Set(expected) == Set(StandingCondition.allCases),
+      "a new condition was added without placing it in the expected order")
+    for (a, b) in zip(expected, expected.dropFirst()) {
+      #expect(a.severity <= b.severity, "\(a) must not sort below \(b)")
+    }
+    // And sorting must be a total order — equal severities break on declaration order, because `sorted(by:)`
+    // is not stable in Swift and menu lines that shuffle between reads would be their own defect.
+    #expect(StandingCondition.sorted(expected.reversed()) == expected)
   }
 
   @Test func deniedNeverRoutesToAnInAppPrompt() {

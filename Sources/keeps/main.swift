@@ -8,7 +8,8 @@
  import ApplicationServices  // AXIsProcessTrusted for the restore path
  import Core
  import CoreGraphics
- import UserNotifications
+ import ServiceManagement
+import UserNotifications
  import os
 
  let log = Logger(subsystem: "com.rigelblu.keeps", category: "main")
@@ -90,6 +91,25 @@
      print("SkyLight read failed (cid==0) — restored nothing")
      exit(1)
    }
+   if r.staleSession {
+     // #keeps-5, 2nd-pass review finding 1: without this the run printed "would restore 0" — indistinguishable
+     // from "nothing needed moving", which is exactly the three-way ambiguity this feature exists to remove.
+     // #keeps-5.4 + review R2: `5.4` handles dead ids, so "its ids are dead" is no longer WHY a run
+     // refuses — nothing resolved is. And the old tail advised "Save this layout again", the one remedy the
+     // 2026-07-27 Decision forbids: with the apps closed, Save permanently replaces the layout with an empty
+     // one. Say the real cause, and point at the action that recovers rather than the one that destroys.
+     print(
+       "REFUSED — none of this layout's apps are running, so there is nothing to match it against. "
+         + "Nothing was touched. Open the apps and restore again — do NOT save over it.")
+     exit(1)
+   }
+   if r.coldStart {
+     // #keeps-5.4: a best-effort run must announce itself. Otherwise it reads identically to an exact
+     // restore, and the user learns the wrong thing about what keeps actually knows about their windows.
+     print(
+       "COLD START — this snapshot predates the last restart, so its window ids are dead. "
+         + "Resolved \(r.coldStartMatched)/\(snap.windows.count) windows by app + position instead.")
+   }
    let skipStr = r.skips.sorted { $0.value > $1.value }.map { "\($0.key.rawValue)=\($0.value)" }
      .joined(separator: ", ")
    print(
@@ -129,6 +149,12 @@
    let r = runCarry(snap, apply: apply)
    if r.readFailed {
      print("SkyLight read failed (cid==0) — carried nothing")
+     exit(1)
+   }
+   if r.staleSession {
+     print(
+       "REFUSED — none of this layout's apps are running, so there is nothing to match it against. "
+         + "Nothing was touched. Open the apps and restore again — do NOT save over it.")
      exit(1)
    }
    if r.navigationDead {
@@ -193,8 +219,12 @@
    // #keeps-20: the standing-condition lines, above statusLine. statusLine reports what keeps last DID; a
    // standing condition reports what is STOPPING it, so it reads first — and unlike statusLine it is
    // clickable. Pre-created and hidden (statusLine's idiom) so the menu is never rebuilt under an open menu.
-   // Two is the ceiling: one Accessibility line plus one notification line (the notification states are
-   // mutually exclusive).
+   // FOUR is the ceiling (#keeps-5 raised it from two): one Accessibility line, one notification line (those
+   // states are mutually exclusive), one stale-snapshot line, and one spare. Two was correct for #keeps-20's
+   // condition set and became wrong the moment #keeps-5 added a source — and the case that overflowed was
+   // this feature's own headline scenario, first login after a reboot, where the line dropped is the NEW one.
+   // A ceiling is a property of the condition set, so it moves when the set does; the OVERFLOW trace below
+   // stays as the backstop that says so out loud.
    var conditionItems: [NSMenuItem] = []
    var conditionSeparator: NSMenuItem!
    private var conditionsEverPublished = false  // so a clean first read still leaves evidence in the trace
@@ -205,6 +235,20 @@
    // enforce, so AX now publishes without ever touching the async path.
    private var axCondition: StandingCondition?
    private var notificationCondition: StandingCondition?
+   // #keeps-5. Sourced independently of the other two, for the reason #keeps-20's review found the hard way:
+   // a condition that waits on another condition's I/O is a condition that can go missing. This one is a
+   // local file-read + a sysctl, so it publishes synchronously alongside AX.
+   private var sessionCondition: StandingCondition?
+   // #keeps-5.2. Sticky within a run: a failed `register()` is not re-derivable by reading OS state (the
+   // service simply reads `.notRegistered`, same as never having tried), so unlike the other conditions this
+   // one is REMEMBERED until a later attempt or a `.requiresApproval` read replaces it.
+   private var loginCondition: StandingCondition?
+   // #keeps-5.4: EVIDENCE, not prediction. Set when a restore actually dead-ends (pre-boot snapshot, none of
+   // its apps running), cleared by the next successful restore or save. The predictive version nagged after
+   // every reboot about a state keeps handles fine, and a condition that fires when nothing is wrong is how
+   // users learn to ignore conditions.
+   private var lastRestoreDeadEnded = false
+   var loginItem: NSMenuItem!  // #keeps-5.2 — checkmark is DERIVED from the OS, never stored
    /// Monotonic generation, so a slow reply from an older `getNotificationSettings` cannot overwrite a newer
    /// one. Overlapping reads are routine here — every menu open starts another.
    private var conditionGeneration = 0
@@ -257,7 +301,7 @@
      // #keeps-20: conditions first — what's stopping keeps outranks what keeps last did. Target+action make
      // them genuinely clickable (AppKit auto-enables on a live target), which is what separates a condition
      // from statusLine's info-only line.
-     for _ in 0..<2 {
+     for _ in 0..<4 {
        let item = NSMenuItem(title: "", action: #selector(fixCondition(_:)), keyEquivalent: "")
        item.target = self
        item.isHidden = true
@@ -285,6 +329,16 @@
        title: "Save Window Layouts & Spaces", action: #selector(save), keyEquivalent: "s")
      saveItem.target = self
      menu.addItem(saveItem)
+     menu.addItem(.separator())
+     // #keeps-5.2: the FIRST preference in a menu that has only ever held verbs, state, and faults. It stays
+     // at top level because hiding a setting people go looking for is worse than one more row — but the rule
+     // is written down before it is tested: the THIRD preference earns an `Options ▸` submenu, which is what
+     // macOS itself does for this exact item in the Dock menu. Copy is verbatim the platform's ("Open at
+     // Login"), minus "keeps" — inside keeps' own menu the subject is never in doubt.
+     loginItem = NSMenuItem(
+       title: "Open at Login", action: #selector(toggleOpenAtLogin), keyEquivalent: "")
+     loginItem.target = self
+     menu.addItem(loginItem)
      menu.addItem(.separator())
      menu.addItem(
        NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
@@ -326,6 +380,7 @@
          tick("⚠")
          return
        }
+       lastRestoreDeadEnded = false  // a fresh save is exactly the remedy — clear it in the same beat
        log.info("manual save: \(snap.windows.count) windows → \(url.path)")
        noteCapture(snap, "manual")
        tick("✓")
@@ -355,17 +410,25 @@
      {
      case .restore:
        lastSettled = fp
+       DebugTrace.log("[settle] \(reason): known config \(fp) — restoring")
        performRestore(reason: reason)
      case .capture:
        lastSettled = fp
        pendingCarry = nil  // #keeps-13: a never-seen config has no carry offer — supersede any stale one
+       DebugTrace.log("[settle] \(reason): unknown config \(fp) — capturing")
        autoCapture(reason: reason)
      case .skipNoChange:
        log.info(
          "settle (\(reason, privacy: .public)): same config [\(fp, privacy: .public)] — skip (sleep/wake guard)"
        )
+       // #keeps-5.3 (2026-07-28 probe): also to the TRACE, not just os_log. `Logger.info` is memory-backed
+       // and cannot be read back after the fact, so the one line proving the guard fired was invisible to
+       // the very probe designed to test it — "keeps did nothing" and "keeps decided to do nothing" looked
+       // identical in the evidence. That ambiguity is what the whole standing-condition work exists to end.
+       DebugTrace.log("[settle] \(reason): same config \(fp) — skipped (sleep/wake guard)")
      case .skipNoDisplays:
        log.info("settle (\(reason, privacy: .public)): no active displays — skip")
+       DebugTrace.log("[settle] \(reason): no active displays — skipped")
      }
    }
  
@@ -402,9 +465,27 @@
          tick("⚠")
          return false
        }
+       // #keeps-5, 2nd-pass review finding 1. Without this the refusal fell straight through to
+       // `noteRestore` — "Last restored: <stamp> · 0 placed" with the SUCCESS glyph, on a run that placed
+       // nothing and knew exactly why. That is #keeps-20's defect rebuilt inside the feature that cites it.
+       // Returning false also stops #keeps-16's flow-into-carry, which would otherwise chase a refused phase 1.
+       guard !r.staleSession else {
+         log.info("restore (\(reason, privacy: .public)): REFUSED — pre-boot snapshot, nothing resolvable")
+         lastRestoreDeadEnded = true
+         // Deliberately NOT the condition's words. The standing line above already says what is wrong and
+         // how to fix it, persistently and clickably; the status line's job is what keeps LAST DID, with a
+         // stamp. Saying the same sentence twice, two rows apart, in near-identical wording ("Save again" vs
+         // "Save it again") reads as two different instructions — the #keeps-22 copy lesson, found in the
+         // live menu on 2026-07-28.
+         note("Restore declined \(stamp()) · none of these apps are running")
+         tick("⚠")
+         refreshStandingConditions()  // raise the standing line NOW, not at the next menu open
+         return false
+       }
        log.info(
          "restore (\(reason, privacy: .public)): placed \(r.applied)/\(r.planned), deferred \(r.carryDeferred), fp=\(fp, privacy: .public)"
        )
+       lastRestoreDeadEnded = false  // this run resolved something ⇒ the dead-end condition is stale
        noteRestore(r, reason)
        let raised = CarryAffordance.afterRestore(fingerprint: fp, deferred: r.carryDeferred)  // #keeps-13: offer the carry iff a tap can bring windows home (#keeps-17.3 honest count)
        let isNewOffer = raised != nil && raised != pendingCarry
@@ -497,6 +578,22 @@
        tick("⚠")
        return
      }
+     // #keeps-5, 2nd-pass review finding 1 — the sharpest instance. Falling through here reaches
+     // `notifyVerdict` with plannedCarries == 0, whose copy is "Everything was already in place". Reachable
+     // for real once 5.2 makes login-launch routine: a pre-reboot offer banner survives in Notification
+     // Center, the tap gates on notification id rather than a live pendingCarry, and keeps would confidently
+     // assert the layout is fine immediately after the reboot that scrambled it.
+     if r.staleSession {
+       log.info("carry: REFUSED — pre-boot snapshot, nothing resolvable")
+       // Review R1: this branch called `refreshStandingConditions()` without setting the flag that function
+       // reads — so it raised nothing and the run was a transient note and silence. The house law applied to
+       // the restore path and not to its sibling in the same change.
+       lastRestoreDeadEnded = true
+       note("Carry declined \(stamp()) · none of these apps are running")
+       tick("⚠")
+       refreshStandingConditions()
+       return
+     }
      log.info(
        "carry: carried \(r.carried)/\(r.plannedCarries), skipped \(r.skipped), aborted=\(r.aborted), fp=\(fp, privacy: .public)"
      )
@@ -585,7 +682,11 @@
 
    private func noteRestore(_ r: Restore.Result, _ kind: String) {
      let tail = r.carryDeferred > 0 ? " · \(r.carryDeferred) on other Spaces" : ""
-     note("Last restored: \(stamp()) · \(r.applied) placed\(tail)")
+     // #keeps-5.4: a cold-start run resolved windows by app + position, not by id — best-effort by
+     // construction, because with no window titles seven Bear windows are indistinguishable. It must not read
+     // identically to an exact restore, or the user learns the wrong thing about what keeps actually knows.
+     let how = r.coldStart ? " · matched by app & position after the restart" : ""
+     note("Last restored: \(stamp()) · \(r.applied) placed\(tail)\(how)")
    }
  
    // #keeps-19: one-writer rule for the glyph — while a carry runs, the run's signifier is the ONLY writer.
@@ -622,6 +723,21 @@
      // AX FIRST and SYNCHRONOUSLY. It is the more severe condition and it is a cheap local read — making it
      // wait behind an XPC round trip is what turned a failed restore into a silent do-nothing.
      axCondition = AXIsProcessTrusted() ? nil : .accessibilityOff
+     // Review C2: the flag is EVIDENCE, and evidence goes stale. A dead end means "none of this layout's
+     // apps are running" — and the user reopening one is exactly the thing that makes a plain Restore work
+     // again. Left unchecked, the line kept asserting a false cause while offering a click that overwrites
+     // the layout, at the very moment restoring would have succeeded. So re-ground it at menu open: cheap
+     // (a bundle-id set intersection, no AX sweep), and it makes the condition self-clearing in practice.
+     if lastRestoreDeadEnded, anyAppOfCurrentSnapshotIsRunning() { lastRestoreDeadEnded = false }
+     sessionCondition = lastRestoreDeadEnded ? .savedLayoutUnmatchable : nil
+     syncLoginItemCheckmark()  // #keeps-5.2: same re-read-on-open idiom the conditions use
+     if Bundle.main.bundleIdentifier != nil {
+       switch SMAppService.mainApp.status {
+       case .requiresApproval: loginCondition = .loginItemBlocked  // only the user, in Settings, can clear it
+       case .enabled, .notRegistered: loginCondition = nil  // not registered is a CHOICE, never a fault
+       default: break  // .notFound and any future case: keep whatever a failed toggle recorded
+       }
+     }
      publishConditions()
      // An unbundled build cannot post at all, by design (#keeps-13) — that is a property of the build, not a
      // condition the user can fix, so it must never appear as one.
@@ -639,6 +755,71 @@
          self.publishConditions()
        }
      }
+   }
+
+   /// #keeps-5.2: reflect the OS, never a stored flag.
+   ///
+   /// The checkmark is READ from `SMAppService.mainApp.status` on every menu open — the same idiom the
+   /// standing conditions use, and for the same reason: keeps gets no notification when the user removes the
+   /// login item over in System Settings, so a remembered boolean would confidently show a checkmark for a
+   /// registration that no longer exists. A control that lies about system state is worse than no control.
+   private func syncLoginItemCheckmark() {
+     // Same gate, same reasoning as `notificationsAvailable` (#keeps-13): `SMAppService.mainApp` needs a real
+     // bundle, so an unbundled dev build cannot register at all. That is a property of the BUILD, not
+     // something the user can fix — so the row is hidden rather than shown as a dead control. A visible
+     // toggle that can never take is the "checkmark that lies" failure wearing different clothes.
+     guard Bundle.main.bundleIdentifier != nil else {
+       loginItem?.isHidden = true
+       return
+     }
+     loginItem?.isHidden = false
+     let status = SMAppService.mainApp.status
+     loginItem?.state = (status == .enabled) ? .on : .off
+     // `.requiresApproval` means the user disabled it in Settings and only they can re-enable it — the
+     // checkmark must read OFF (it is not running at login) while the click still routes somewhere useful.
+     loginItem?.toolTip =
+       status == .requiresApproval
+       ? "Turn this on in System Settings › General › Login Items" : nil
+   }
+
+   @objc private func toggleOpenAtLogin() {
+     let service = SMAppService.mainApp
+     do {
+       if service.status == .enabled {
+         try service.unregister()
+         noteNotify("login item: unregistered")
+       } else {
+         try service.register()
+         noteNotify("login item: registered — status now \(service.status.rawValue)")
+       }
+     } catch {
+       // Never a silent failure. The first build stopped at `noteNotify` — a unified-log line the user will
+       // never read — so the click did nothing visible at all (2nd-pass review finding 2). The checkmark
+       // staying off is true but not an explanation; the standing condition is.
+       noteNotify("login item: toggle FAILED — \(error.localizedDescription)")
+       loginCondition = .loginItemBlocked
+     }
+     syncLoginItemCheckmark()
+     refreshStandingConditions()
+   }
+
+   /// Is any app from the current config's saved layout running right now?
+   ///
+   /// The re-grounding for `savedLayoutUnmatchable` (review C2). Deliberately a *weak* test — ANY app being
+   /// back is enough to retire the claim "none of them are running", because that claim is what the label
+   /// says and a label must not outlive its truth. A restore that then still dead-ends simply raises it again
+   /// with fresh evidence.
+   private func anyAppOfCurrentSnapshotIsRunning() -> Bool {
+     let store = Store()
+     let fp = ConfigIdentity.fingerprint()
+     guard store.exists(fingerprint: fp), let snap = try? store.load(fingerprint: fp) else { return false }
+     let wanted = Set(snap.windows.map(\.bundleId))
+     guard !wanted.isEmpty else { return false }
+     let running = Set(
+       NSWorkspace.shared.runningApplications
+         .filter { $0.activationPolicy == .regular }
+         .map { AppIdentity.encode(bundleId: $0.bundleIdentifier, pid: $0.processIdentifier) })
+     return !wanted.isDisjoint(with: running)
    }
 
    /// Map notification settings onto a condition. Three distinct faults present as the same evidence to the
@@ -667,7 +848,8 @@
    /// that never ran, which is the exact ambiguity that cost weeks.
    private func publishConditions() {
      dispatchPrecondition(condition: .onQueue(.main))  // "Main-thread only." — enforced, not hoped
-     let sorted = StandingCondition.sorted([axCondition, notificationCondition].compactMap { $0 })
+     let sorted = StandingCondition.sorted(
+       [axCondition, notificationCondition, sessionCondition, loginCondition].compactMap { $0 })
      let changed = sorted != standingConditions
      standingConditions = sorted  // didSet renders, on change only
      guard changed || !conditionsEverPublished else { return }
@@ -695,8 +877,8 @@
        item.isHidden = false
      }
      if standingConditions.count > conditionItems.count {
-       // Two slots is today's ceiling, but the ceiling is enforced by a switch far from here. If a third
-       // ever goes live, say so rather than dropping it in silence.
+       // Four slots is today's ceiling, but the ceiling is enforced far from here. If a fifth ever goes
+       // live, say so rather than dropping it in silence.
        let dropped = standingConditions.dropFirst(conditionItems.count).map(\.traceName).joined(separator: ",")
        noteNotify("conditions: OVERFLOW — no slot for \(dropped)")
      }
@@ -720,6 +902,12 @@
              ?? "permission: request returned granted=\(granted)")
          DispatchQueue.main.async { self?.refreshStandingConditions() }  // off-main: see notifyVerdict
        }
+     case .fixInApp:
+       // #keeps-5: the fix IS the Save the user could have clicked two lines down. Routing through the same
+       // method rather than re-implementing a capture means the condition can never be cleared by a path that
+       // does something subtly different from what the menu verb does.
+       save()
+       refreshStandingConditions()  // already on main (menu action) — clear the line in the same beat
      case .openSettings(let url):
        guard let u = URL(string: url) else {
          noteNotify("permission: settings URL malformed — \(url)")

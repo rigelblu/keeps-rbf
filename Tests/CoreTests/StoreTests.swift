@@ -80,4 +80,38 @@ import Testing
     #expect(store.exists(fingerprint: "ffffffffffffffff") == false)  // a different, valid-shape fp
     #expect(store.exists(fingerprint: "../bad") == false)  // invalid shape ⇒ absent, no I/O
   }
+
+  @Test func saveKeepsOnePreviousCopy() throws {
+    // Review C2: Save was a plain atomic overwrite with NO history, so one click could permanently destroy
+    // the layout the user was trying to restore — and for a while keeps recommended exactly that click after
+    // a reboot. A misplaced window is recoverable by dragging; a destroyed snapshot is not.
+    let dir = FileManager.default.temporaryDirectory
+      .appendingPathComponent("keeps-store-history-\(UUID().uuidString)")
+    let store = Store(directory: dir)
+    let fp = String(repeating: "a", count: 16)
+
+    let first = Snapshot(
+      schema: captureSchema, capturedAt: Date(timeIntervalSince1970: 1_000),
+      configFingerprint: fp, displays: [], windows: [])
+    _ = try store.save(first)
+    let previous = dir.appendingPathComponent("\(fp).previous.json")
+    #expect(!FileManager.default.fileExists(atPath: previous.path), "nothing to back up on a first save")
+
+    let second = Snapshot(
+      schema: captureSchema, capturedAt: Date(timeIntervalSince1970: 2_000),
+      configFingerprint: fp, displays: [], windows: [])
+    _ = try store.save(second)
+
+    #expect(FileManager.default.fileExists(atPath: previous.path), "the overwritten snapshot is kept")
+    let dec = JSONDecoder()
+    dec.dateDecodingStrategy = .iso8601
+    let kept = try dec.decode(Snapshot.self, from: Data(contentsOf: previous))
+    #expect(kept.capturedAt == first.capturedAt, "the copy is the OLD one, not the new one")
+    #expect(try store.load(fingerprint: fp).capturedAt == second.capturedAt, "the live one is current")
+
+    // The backup must be invisible to normal lookups — `.previous.json` is not a fingerprint, so no config
+    // can ever resolve to it and no restore can act on it by accident.
+    #expect(!store.exists(fingerprint: "\(fp).previous"))
+    try? FileManager.default.removeItem(at: dir)
+  }
 }
