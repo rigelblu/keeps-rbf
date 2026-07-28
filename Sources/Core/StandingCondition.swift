@@ -40,6 +40,26 @@ public enum StandingCondition: Equatable, CaseIterable {
   /// leaving the original #keeps-20 failure mode live for a case the file explicitly enumerated.
   case notificationBannersOff
 
+  /// A restore was attempted against a pre-boot snapshot and **nothing could be resolved** — none of the
+  /// saved layout's apps are running, so there is no live window to match any captured one to (#keeps-5.4).
+  ///
+  /// NARROWED 2026-07-28, and the narrowing is the point. This first meant "the snapshot predates this boot",
+  /// raised predictively on every menu open — which was a permanent nag after every reboot, for a state
+  /// `5.4` then made harmless (keeps resolves those windows by app + position and restores normally). A
+  /// condition that fires when nothing is wrong teaches the user to ignore conditions.
+  ///
+  /// So it is now EVIDENCE-BASED rather than predictive: raised only after a run actually dead-ended, and
+  /// cleared by the next successful restore or save. That also makes it cheap — no AX sweep per menu open.
+  case savedLayoutUnmatchable
+
+  /// `Open at Login` could not be registered — `SMAppService.register()` threw, or the service sits in
+  /// `.requiresApproval` (the user disabled it in System Settings, and only they can re-enable it).
+  ///
+  /// Added at the 2nd-pass review (#keeps-5). The first build sent this failure to `noteNotify` alone: the
+  /// user clicked, the menu closed, the checkmark stayed off, and nothing said why. That is the house law's
+  /// "silent do-nothing" on a brand-new path, in the feature written to end them.
+  case loginItemBlocked
+
   // MARK: - What the user can do about it
 
   /// Who can actually resolve the condition. The distinction is not cosmetic: it decides whether the label
@@ -49,6 +69,11 @@ public enum StandingCondition: Equatable, CaseIterable {
     case promptInApp
     /// Only System Settings can clear it; keeps can route the user there and nothing more.
     case openSettings(String)
+    /// keeps clears it itself, with no OS involved at all — the click runs an ordinary in-app action.
+    /// Distinct from `.promptInApp`, which also stays in-app but hands off to an OS authorization dialog that
+    /// may refuse. Nothing can refuse this one. Added for #keeps-5; the axis the enum has always encoded is
+    /// WHO can resolve the condition, and "keeps, unaided" was the missing third answer.
+    case fixInApp
   }
 
   public var remedy: Remedy {
@@ -68,6 +93,15 @@ public enum StandingCondition: Equatable, CaseIterable {
       return .promptInApp
     case .notificationsDenied, .notificationBannersOff:
       return .openSettings("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+    case .savedLayoutUnmatchable:
+      // Save starts fresh from what IS open. Honest, but it discards the old layout — and `Store.save`
+      // keeps no history, so that loss is permanent. The label says "start fresh" rather than "Save again"
+      // precisely so the click reads as the trade it is. The no-history overwrite is its own banked slice.
+      return .fixInApp
+    case .loginItemBlocked:
+      // Settings, not a retry. `.requiresApproval` means the user turned it off there and only they can turn
+      // it back on — a button that re-called `register()` would be the dead click this case exists to replace.
+      return .openSettings("x-apple.systempreferences:com.apple.LoginItems-Settings.extension")
     }
   }
 
@@ -75,8 +109,10 @@ public enum StandingCondition: Equatable, CaseIterable {
   /// the PROPERTY (verb-first iff we can act) rather than the exact strings, so a copy edit doesn't fail the
   /// suite while a dishonest label would.
   public var keepsCanFixItself: Bool {
-    if case .promptInApp = remedy { return true }
-    return false
+    switch remedy {
+    case .promptInApp, .fixInApp: return true  // #keeps-5: both stay in-app, so both may carry a verb
+    case .openSettings: return false
+    }
   }
 
   // MARK: - Copy
@@ -91,6 +127,10 @@ public enum StandingCondition: Equatable, CaseIterable {
     case .notificationsNotAsked: return "Turn on notifications"
     case .notificationsDenied: return "Notifications are off — open Settings"
     case .notificationBannersOff: return "Notification banners are off — open Settings"
+    // Object first, then the action. Names the real cause — the apps, not the snapshot — because "Save
+    // again" alone would read as "your saved layout is broken" when the truth is "nothing is open to match".
+    case .savedLayoutUnmatchable: return "Saved layout's apps aren't running — Save to start fresh"
+    case .loginItemBlocked: return "keeps can't open at login — open Settings"
     }
   }
 
@@ -102,6 +142,11 @@ public enum StandingCondition: Equatable, CaseIterable {
     switch self {
     case .accessibilityOff: return 0
     case .notificationsNotAsked, .notificationsDenied, .notificationBannersOff: return 1
+    // Last: keeps is working and reachable, it just won't act on a memory it can't trust. A real degradation,
+    // but strictly less severe than "cannot move a window at all" or "cannot reach you".
+    case .savedLayoutUnmatchable: return 2
+    // Lowest: keeps is working right now; this one is only about whether it comes back by itself next time.
+    case .loginItemBlocked: return 3
     }
   }
 
@@ -127,6 +172,8 @@ public enum StandingCondition: Equatable, CaseIterable {
     case .notificationsNotAsked: return "notificationsNotAsked"
     case .notificationsDenied: return "notificationsDenied"
     case .notificationBannersOff: return "notificationBannersOff"
+    case .savedLayoutUnmatchable: return "savedLayoutUnmatchable"
+    case .loginItemBlocked: return "loginItemBlocked"
     }
   }
 

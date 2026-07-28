@@ -31,6 +31,9 @@ public enum Restore {
     case offScreenTarget  // the desired frame resolves to no live display — placing lands unpredictably (#keeps-15 owns the repair)
     case unprovableSpace  // cross-display but no captured spaceUUID — can't prove Space safety, and the carry has no target
     case deferredWrongSpace  // reachable but sitting on the wrong Space — silent AX can't move it there; same-display carry work (#keeps-13 dogfood)
+    // #keeps-5: a live window holds this id, but it belongs to a different app than the one captured. NOT
+    // carry work — the carry can't fix an identity problem either, so this must never reach the offer count.
+    case identityMismatch
   }
 
   enum Action: Equatable {
@@ -59,12 +62,24 @@ public enum Restore {
     var landingDisplay: String? = nil  // live display under the DESIRED frame center — where an AX-set would actually land; nil ⇒ off-screen
     var landingActiveSpace: String? = nil  // the landing display's active Space uuid (nil ⇒ unknown — treated as unprovable)
     var currentSpace: String? = nil  // the window's own current Space uuid (#keeps-15 slice 2 — background idempotence); nil ⇒ unknown
+    // #keeps-5: does the live window's owning app still match the captured one? Defaults true so every
+    // existing test fixture keeps meaning what it meant — this guard adds a rejection, it re-classifies nothing.
+    var identityOK: Bool = true
+
+    /// A live window exists under this id, but it belongs to someone else. Every other field is deliberately
+    /// inert — `decide` rejects on `identityOK` before reading any of them.
+    static let impostor = Match(
+      reachable: false, minimized: false, liveSpaceCount: 0, liveFrame: nil, identityOK: false)
   }
 
   /// The restore filter, as one pure function. Order matters: cheapest/most-decisive rejects first.
   /// ±tolerance on `alreadyCorrect` defeats 1px rounding thrash (Q6).
   static func decide(_ cap: CapturedWindow, match: Match?, tolerance: Int = 2) -> Action {
     guard let m = match else { return .skip(.gone) }  // no live window in .optionAll at all
+    // #keeps-5: identity outranks every other verdict. A window we can't prove is the one we captured must not
+    // be placed, deferred, or counted as carry work — deferring it is what fed an impostor to the carry, where
+    // the grab is geometric and the membership check would have called the move a success.
+    guard m.identityOK else { return .skip(.identityMismatch) }
     if m.minimized || m.liveSpaceCount == 0 { return .skip(.minimized) }  // 0-space = minimized/junk, NOT background (M1)
     guard m.reachable else {
       // #keeps-15 slice 2 (shipped early, v0.6.0): a background window that is already fully home — frame at
@@ -183,12 +198,52 @@ public enum Restore {
 
   /// Classify every captured window against live state — each paired with its `Action`. The seam #keeps-12's
   /// carry re-runs at trigger time, then filters for `.skip(.deferredBackground)` to get its carry set.
-  static func classify(_ snapshot: Snapshot, against live: LiveState, tolerance: Int = 2) -> [(
-    CapturedWindow, Action
-  )] {
+  /// `remap` is #keeps-5.4's cold-start substitution: captured `cgWindowId` → the live id standing in for it.
+  /// Empty in the normal same-session case, so this is the identity function and nothing about the existing
+  /// truth table changes. One substitution point is deliberately the WHOLE integration — every rule below
+  /// (reachability, Space guards, idempotence, the identity guard) then applies unmodified to a cold start.
+  /// `remap` is `nil` for a same-session run (ids are trustworthy, use them directly) and NON-NIL for a cold
+  /// start, where a captured id is dead and the map is the ONLY way to resolve it. That distinction is a
+  /// type, not a convention, because the first version used an empty dictionary and fell back to
+  /// `remap[id] ?? id` — which in a cold start hands an unresolved window its DEAD id, and ids recycle from
+  /// low numbers after a reboot, so that id routinely belongs to a live stranger. It also let one live window
+  /// be claimed twice: once legitimately through the map, once through a colliding fallback. Both wrong-window
+  /// mutations, on the exact path this feature exists to make safe. A miss must be `gone`, and now cannot be
+  /// anything else.
+  static func classify(
+    _ snapshot: Snapshot, against live: LiveState, tolerance: Int = 2,
+    remap: [CGWindowID: CGWindowID]? = nil
+  ) -> [(CapturedWindow, Action)] {
     snapshot.windows.map { cap in
-      (cap, decide(cap, match: matchFor(cap, live: live), tolerance: tolerance))
+      (cap, decide(cap, match: matchFor(cap, live: live, remap: remap), tolerance: tolerance))
     }
+  }
+
+  /// The live ids for a cold start, lifted out of `LiveState` so `ColdStartMatch` stays pure.
+  static func coldStartRemap(_ snapshot: Snapshot, live: LiveState) -> [CGWindowID: CGWindowID] {
+    // The candidate set must be exactly "windows CAPTURE would have stored" — mirroring `Capture.decide`'s
+    // filter chain, not approximating it. The first build filtered on nothing but ownership and matched real
+    // windows to 1×1 utility windows and 1800×39 chrome, which then classified `minimized` and starved the
+    // real windows of their slots: 26 of 29 came back that way on the live fleet.
+    //
+    // Same four guards as `Capture.decide`, in the same order: attributable owner → normal layer →
+    // non-degenerate frame → occupies at least one Space. The Space read is the only costly one and runs on
+    // the cold-start path only, over candidates rather than over every window in the system.
+    let liveWindows = live.existence.normalLayer.compactMap { id -> ColdStartMatch.LiveWindow? in
+      guard let identity = live.existence.owners[id] else { return nil }  // unattributable ⇒ never a match
+      let frame = live.existence.frames[id]
+      guard
+        ColdStartMatch.isCandidate(
+          normalLayer: true,  // this set is already layer-filtered; passed explicitly so the gate is one rule
+          frame: frame,
+          hasSpace: !cgsSpacesForWindow(live.cid, id).isEmpty)
+      else { return nil }
+      return ColdStartMatch.LiveWindow(id: id, identity: identity, frame: frame)
+    }
+    DebugTrace.log(
+      "=== cold-start candidates: \(liveWindows.count) live windows survive capture's filter "
+        + "(of \(live.existence.normalLayer.count) normal-layer, \(live.existence.ids.count) total)")
+    return ColdStartMatch.assign(captured: snapshot.windows, live: liveWindows)
   }
 
   // MARK: - I/O sweep
@@ -201,6 +256,16 @@ public enum Restore {
     public let outcomes: [Outcome]  // per-window decision — every captured window, inspectable
     public let dryRun: Bool
     public let readFailed: Bool  // cid == 0 — SkyLight read failed; nothing read or done (M4)
+    // #keeps-5: the snapshot predates this boot (or boot time was unreadable), so every cgWindowId in it is
+    // churned. The WHOLE run is refused before any window is touched — after a reboot every id is dead, so
+    // skipping them one at a time would report 38 individual mismatches and never state the one real cause.
+    // The host raises a standing condition off this; a silent refusal would be the very defect #keeps-20 fixed.
+    public var staleSession: Bool = false
+    // #keeps-5.4: this run resolved its windows by app+position rather than by id, because the snapshot
+    // predates the boot. Surfaced so the status line can SAY so — a best-effort restore must not read
+    // identically to one that matched exactly, or the user learns the wrong thing about what keeps knows.
+    public var coldStart: Bool = false
+    public var coldStartMatched: Int = 0
     public var deferredBackground: Int { skips[.deferredBackground] ?? 0 }  // the #keeps-12 handoff size
     /// The carry-owned deferrals — background-Space windows, the #keeps-17 guard's cross-display ones, and
     /// visible windows sitting on a wrong Space. The MVP offer's honest count (#keeps-17.3): everything a
@@ -229,6 +294,28 @@ public enum Restore {
         planned: 0, applied: 0, failures: 0, skips: [:], outcomes: [], dryRun: !apply,
         readFailed: true)
     }
+    // #keeps-5.4: a prior-session snapshot no longer means "refuse". It means the saved `cgWindowId`s are
+    // dead and must be resolved another way — by app + position (`ColdStartMatch`). `5.1`'s whole-run refusal
+    // survives ONLY as the fallback when nothing can be resolved at all, which is the one case where
+    // proceeding would place nothing anyway and a bare "0 restored" would be the ambiguity we removed.
+    //
+    // The first shape of this was refuse-always, and dogfood killed it the day it shipped: the remedy keeps
+    // offered ("Save again") would OVERWRITE the very layout being restored, because `Store.save` keeps no
+    // history. Refusing was the safe half of an unfinished thought.
+    var remap: [CGWindowID: CGWindowID]? = nil  // nil ⇒ same session, ids are trustworthy
+    let coldStart = !SessionFreshness.isCurrent(snapshot)
+    if coldStart {
+      remap = coldStartRemap(snapshot, live: live)
+      DebugTrace.log(
+        "=== restore fp=\(snapshot.configFingerprint) COLD START — snapshot predates this boot "
+          + "(capturedAt=\(snapshot.capturedAt)); resolved \(remap?.count ?? 0)/\(snapshot.windows.count) "
+          + "windows by app+position")
+      guard !(remap ?? [:]).isEmpty else {  // nothing resolvable ⇒ the honest stop, not a bare zero
+        return Result(
+          planned: 0, applied: 0, failures: 0, skips: [:], outcomes: [], dryRun: !apply,
+          readFailed: false, staleSession: true)
+      }
+    }
     var planned = 0
     var applied = 0
     var failures = 0
@@ -240,13 +327,17 @@ public enum Restore {
         "=== restore fp=\(snapshot.configFingerprint) apply=\(apply)\(DebugTrace.focusNote) — displays: "
           + DebugTrace.displaysHeader(dbg))
     }
-    for (cap, action) in classify(snapshot, against: live, tolerance: tolerance) {
-      let before = live.existence.frames[cap.cgWindowId]  // the trace's "before" AND the #keeps-17 restitution target
+    for (cap, action) in classify(snapshot, against: live, tolerance: tolerance, remap: remap) {
+      // Same resolve-or-refuse rule as `matchFor`. An unresolved cold-start window never reaches a `.place`
+      // (it classified `gone`), so this only has to be self-consistent — but a raw fallback here would still
+      // read a stranger's frame into the trace's "before", which is how a wrong-window bug hides in plain sight.
+      let wid = coldStart ? (remap?[cap.cgWindowId] ?? 0) : cap.cgWindowId
+      let before = live.existence.frames[wid]  // the trace's "before" AND the #keeps-17 restitution target
       var label = action.label  // reclassified to a skip reason when verify-after-place restitutes (#keeps-17)
       switch action {
       case .place(let frame, let verifySpace):
         planned += 1
-        if apply, let el = live.reachable[cap.cgWindowId]?.element {  // dry run, or lost the element, ⇒ count only
+        if apply, let el = live.reachable[wid]?.element {  // dry run, or lost the element, ⇒ count only
           let ok = setFrame(el, frame)
           var decision = ok ? "placed" : "place-FAILED(axSet)"
           if !ok { failures += 1 }
@@ -259,7 +350,10 @@ public enum Restore {
             // that still isn't home after the poll restitutes the frame (best-effort, Q4) and reclassifies the
             // window as carry-deferred. Never a silent wrong-Space landing.
             func landedSpace() -> String? {
-              cgsSpacesForWindow(live.cid, cap.cgWindowId).first
+              // `wid`, not `cap.cgWindowId` (#keeps-5.4): after a cold start the captured id is dead, and
+              // polling it would read nothing forever — the poll would time out and restitute a place that
+              // actually succeeded. The verification has to ask about the window we really moved.
+              cgsSpacesForWindow(live.cid, wid).first
                 .flatMap { live.desktopIndex.uuid(ofManagedID: $0) }
             }
             var landed = landedSpace()
@@ -309,7 +403,8 @@ public enum Restore {
     }
     return Result(
       planned: planned, applied: applied, failures: failures, skips: skips,
-      outcomes: outcomes, dryRun: !apply, readFailed: false)
+      outcomes: outcomes, dryRun: !apply, readFailed: false,
+      coldStart: coldStart, coldStartMatched: remap?.count ?? 0)
   }
 
   // MARK: - I/O helpers
@@ -317,10 +412,27 @@ public enum Restore {
   struct Reachable {
     let element: AXUIElement
     let minimized: Bool
+    let identity: String  // #keeps-5: owning app, AppIdentity-encoded — the guard's left-hand side
   }  // internal: held by LiveState (#keeps-12 seam)
+  /// #keeps-5: `owners` is not decoration. The gone-test used to be bare-id, and the brief's first draft argued
+  /// that was harmless because "every placement goes through the guarded `reachable[…]`". The independent review
+  /// disproved it: a bare-id hit here classifies `deferredBackground`, which routes the window into the CARRY —
+  /// and the carry reads bounds by bare wid, grabs by geometry, and its membership check then PASSES, because
+  /// the impostor really did land on the target Space. A stranger's window moved, reported as success.
+  /// Guarding at this seam keeps an impostor out of the carry set entirely, so no grab behavior has to change.
   struct Existence {
     let ids: Set<CGWindowID>
     let frames: [CGWindowID: WindowFrame]
+    let owners: [CGWindowID: String]
+    /// #keeps-5.4: ids on the NORMAL window layer only — the same `layer == 0` filter capture applies
+    /// (`Capture.swift:52`, `notNormalLayer`: "menus, panels, status items, shadows").
+    ///
+    /// `ids` above stays unfiltered on purpose: it answers "does this window still exist at all", and
+    /// narrowing it would change gone-detection. But cold-start MATCHING must only ever consider windows
+    /// capture itself would have stored — the first build didn't, and Safari's real window was matched to
+    /// Safari's 1800×39 status-bar window at the origin, which has no Space and so classified `minimized`.
+    /// 26 of 29 windows came back that way. Two sets, two questions.
+    let normalLayer: Set<CGWindowID>
   }
 
   /// Live windows reachable via public AX — i.e. on each display's ACTIVE desktop (+ minimized). Keyed by
@@ -328,6 +440,11 @@ public enum Restore {
   private static func reachableWindows() -> [CGWindowID: Reachable] {
     var map: [CGWindowID: Reachable] = [:]
     for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+      // #keeps-5: the owning app is already in hand here — the identity guard costs one field, not a second
+      // enumeration. (This is why the fix belongs at this commit: the earlier attempt to land it back at
+      // #keeps-3 cascaded conflicts through 14 commits, not because it was hard.)
+      let identity = AppIdentity.encode(
+        bundleId: app.bundleIdentifier, pid: app.processIdentifier)
       let axApp = AXUIElementCreateApplication(app.processIdentifier)
       AXUIElementSetMessagingTimeout(axApp, 1.0)
       var winsVal: AnyObject?
@@ -337,7 +454,8 @@ public enum Restore {
       else { continue }
       for w in windows {
         guard let wid = axWindowID(w) else { continue }
-        map[wid] = Reachable(element: w, minimized: axFlag(w, kAXMinimizedAttribute))
+        map[wid] = Reachable(
+          element: w, minimized: axFlag(w, kAXMinimizedAttribute), identity: identity)
       }
     }
     return map
@@ -348,22 +466,52 @@ public enum Restore {
   private static func enumerateExistence() -> Existence {
     var ids = Set<CGWindowID>()
     var frames: [CGWindowID: WindowFrame] = [:]
+    var owners: [CGWindowID: String] = [:]
+    var normalLayer = Set<CGWindowID>()
+    let identities = AppIdentity.liveMap()  // #keeps-5: one read, reused for every window below
     for info in (CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]])
       ?? []
     {
       guard let wid = info[kCGWindowNumber as String] as? CGWindowID, wid != 0 else { continue }
       ids.insert(wid)
       if let f = frame(from: info) { frames[wid] = f }
+      // kCGWindowOwnerPID and kCGWindowLayer ride in the SAME dictionary this loop already reads — no
+      // extra syscall for either.
+      if let pid = info[kCGWindowOwnerPID as String] as? pid_t, let id = identities[pid] {
+        owners[wid] = id
+      }
+      if (info[kCGWindowLayer as String] as? Int ?? -1) == 0 { normalLayer.insert(wid) }
     }
-    return Existence(ids: ids, frames: frames)
+    return Existence(ids: ids, frames: frames, owners: owners, normalLayer: normalLayer)
   }
 
   /// Lift one captured window's live state into a pure `Match` (nil ⇒ gone). The space lookup is lazy — done
   /// only for matched-but-not-reachable windows, where it discriminates a background desktop (1 space) from
   /// minimized/junk (0 spaces, the M1 fix) — never for the hundreds the reachable set already covers.
-  private static func matchFor(_ cap: CapturedWindow, live: LiveState) -> Match? {
-    if let r = live.reachable[cap.cgWindowId] {
-      let frame = live.existence.frames[cap.cgWindowId]
+  private static func matchFor(
+    _ cap: CapturedWindow, live: LiveState, remap: [CGWindowID: CGWindowID]? = nil
+  ) -> Match? {
+    // #keeps-5.4: resolve the id, or refuse. In a cold start the captured id is DEAD, so an unresolved
+    // window has no live counterpart at all and must be `gone` (nil) — never looked up raw. Recycled ids
+    // mean a raw lookup would land on a stranger, and could also hand one live window to two captured
+    // records at once. Same-session (`remap == nil`) uses the captured id, exactly as it always has.
+    let wid: CGWindowID
+    if let remap {
+      guard let resolved = remap[cap.cgWindowId] else { return nil }  // unresolved in a cold start ⇒ gone
+      wid = resolved
+    } else {
+      wid = cap.cgWindowId
+    }
+    // #keeps-5, guard site 1 of 2 (the dangerous one): a reachable hit is placed via AX, so an id whose owner
+    // has changed would silently move a stranger's window. `nil` identity ⇒ mismatch: an unattributable owner
+    // is exactly the case we refuse to guess about.
+    if let r = live.reachable[wid] {
+      // #keeps-5 guard site 1 of 2, and the dangerous one: a reachable hit gets placed via AX, so a changed
+      // owner would silently move a stranger's window to our captured frame. Still load-bearing under a
+      // remap: ColdStartMatch groups by bundleId, so this passes by construction there — but it is the
+      // check that MAKES that true rather than assuming it.
+      guard r.identity == cap.bundleId else { return Match.impostor }
+      let frame = live.existence.frames[wid]
       let landing = live.topology.displayContaining(cap.frame)  // where an AX-set would land TODAY (#keeps-17)
       // A reachable window sits on the ACTIVE Space of the display under its live frame — its current Space
       // resolves from the topology, no extra CGS read (#keeps-13 dogfood: Space-aware idempotence needs it).
@@ -377,12 +525,20 @@ public enum Restore {
         landingActiveSpace: landing?.activeSpaceUUID,
         currentSpace: current?.activeSpaceUUID)
     }
-    guard live.existence.ids.contains(cap.cgWindowId) else { return nil }  // not in .optionAll at all ⇒ gone
-    let spaces = cgsSpacesForWindow(live.cid, cap.cgWindowId)
+    guard live.existence.ids.contains(wid) else { return nil }  // not in .optionAll at all ⇒ gone
+    // #keeps-5 guard site 2 of 2 — the one the brief's first draft argued was harmless. It is not: an
+    // unguarded hit here classifies `deferredBackground`, which hands the id to the CARRY, and the carry
+    // grabs by geometry (Carry.swift:421-423) and then VERIFIES MEMBERSHIP — which passes, because the
+    // impostor genuinely landed on the target Space. Wrong window moved, run reports success. Rejecting here
+    // keeps an impostor out of the carry set entirely, so no grab behavior needed changing.
+    // A window with no attributable owner (`owners[wid] == nil`) is refused for the same reason: capture only
+    // ever stored regular-app windows, so an unattributable live owner cannot be the one we captured.
+    guard live.existence.owners[wid] == cap.bundleId else { return Match.impostor }
+    let spaces = cgsSpacesForWindow(live.cid, wid)
     return Match(
       reachable: false, minimized: false,  // not-in-AX minimized is caught by the 0-space check
       liveSpaceCount: spaces.count,
-      liveFrame: live.existence.frames[cap.cgWindowId],  // #keeps-17 guard facts stay nil — the guard sits on the place path
+      liveFrame: live.existence.frames[wid],  // #keeps-17 guard facts stay nil — the guard sits on the place path
       currentSpace: spaces.first.flatMap { live.desktopIndex.uuid(ofManagedID: $0) })  // #keeps-15 slice 2
   }
 
