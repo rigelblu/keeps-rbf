@@ -397,7 +397,15 @@ public enum Carry {
 
     // MARK: - One window's carry (navigate → grab → carry → verify → place)
 
-    private enum CarryOutcome { case carried, failed(CarrySkip), aborted(CarrySkip) }
+    /// `.carried` carries its evidence (#keeps-23, 2nd pass) — see `FrameHeld`. The payload is not read by
+    /// the sweep, which only counts; it is here so the case cannot be written without a read-back.
+    private enum CarryOutcome { case carried(FrameHeld), failed(CarrySkip), aborted(CarrySkip) }
+
+    /// The hold-leg's result, deliberately NOT `CarryOutcome`. This step proves the VIEW reached the target
+    /// desktop with the window held — it says nothing about the frame, and it is consumed mid-function by
+    /// `executeCarry` rather than returned to the sweep. Until the fold both shared `.carried`, one case
+    /// meaning "the Space switch worked" in one function and "the window is verified home" in three others.
+    private enum StepOutcome { case switched, failed(CarrySkip), aborted(CarrySkip) }
     private static let driftThreshold: CGFloat = 12   // px a parked cursor may wander before we call it real input
 
     /// #keeps-22: the window is already on its captured Space; only its frame drifted. Restore can't repair
@@ -448,15 +456,8 @@ public enum Carry {
         // write, and "accepted ≠ held" is this slice's whole premise — so it cannot prove the window reached
         // the captured position and merely clamped its size. `placeHeld.seen` is the only thing that could
         // say; the log line prints it, and nothing acts on it. See #keeps-29.
-        let placeHeld = await frameSettled(cap)
-        guard placeHeld.held else {
-            log.info(
-                "place wid=\(cap.cgWindowId) on=\(onGlobal) axPlaced=true membershipVerified but frame drifted back: \(Carry.frameNote(cap, placeHeld.seen), privacy: .public) → frameNotHeld")
-            return .failed(.frameNotHeld)
-        }
-        log.info(
-            "place wid=\(cap.cgWindowId) on=\(onGlobal) axPlaced=true membershipVerified frameVerified \(Carry.heldNote(placeHeld.seen, placeHeld.matchedAtMillis), privacy: .public) → PLACED")
-        return .carried
+        return await verifyPlacement(
+            cap, "place wid=\(cap.cgWindowId) on=\(onGlobal) axPlaced=true membershipVerified", verb: "PLACED")
     }
 
     private static func executeCarry(_ cap: CapturedWindow, fromGlobal: Int, toGlobal: Int,
@@ -509,7 +510,7 @@ public enum Carry {
             switch await carryHeld(displayIndex: from.displayIndex, toIndex: to.perDisplayIndex,
                                    fromIndex: from.perDisplayIndex, toGlobal: toGlobal,
                                    shortcuts: shortcuts, cid: cid, parked: &parked) {
-            case .carried:
+            case .switched:
                 break
             case .failed(let reason):
                 log.info("carry wid=\(cap.cgWindowId) FAILED place-leg: \(reason.rawValue, privacy: .public)")
@@ -547,15 +548,9 @@ public enum Carry {
         }
         // #keeps-23: same-display carry — the Space move landed and the AX set was accepted, but neither
         // proves the window holds the captured frame. Verify it before this counts as carried.
-        let carryHeld = await frameSettled(cap)
-        guard carryHeld.held else {
-            log.info(
-                "carry wid=\(cap.cgWindowId) landedOn=\(landedOn ?? -1) target=\(toGlobal) axPlaced=true but frame drifted back: \(Carry.frameNote(cap, carryHeld.seen), privacy: .public) → frameNotHeld")
-            return .failed(.frameNotHeld)
-        }
-        log.info(
-            "carry wid=\(cap.cgWindowId) landedOn=\(landedOn ?? -1) target=\(toGlobal) axPlaced=true frameVerified \(Carry.heldNote(carryHeld.seen, carryHeld.matchedAtMillis), privacy: .public) → CARRIED")
-        return .carried
+        return await verifyPlacement(
+            cap, "carry wid=\(cap.cgWindowId) landedOn=\(landedOn ?? -1) target=\(toGlobal) axPlaced=true",
+            verb: "CARRIED")
     }
 
     /// #keeps-17.2 — the cross-display carry: point the TARGET display's view at the captured Space
@@ -618,14 +613,8 @@ public enum Carry {
         // would have re-homed it. The count stays honest either way (not counted carried); it's the Space
         // claim that's stale. Re-polling membership on this branch belongs to #keeps-26, which owns the
         // cross-display path.
-        let crossHeld = await frameSettled(cap)
-        guard crossHeld.held else {
-            log.info(
-                "carry wid=\(cap.cgWindowId) cross-display landedOn=\(toGlobal) but frame drifted back: \(Carry.frameNote(cap, crossHeld.seen), privacy: .public) → frameNotHeld")
-            return .failed(.frameNotHeld)
-        }
-        log.info("carry wid=\(cap.cgWindowId) cross-display landedOn=\(toGlobal) frameVerified \(Carry.heldNote(crossHeld.seen, crossHeld.matchedAtMillis), privacy: .public) → CARRIED")
-        return .carried
+        return await verifyPlacement(
+            cap, "carry wid=\(cap.cgWindowId) cross-display landedOn=\(toGlobal)", verb: "CARRIED")
     }
 
     /// Best-effort frame restitution after a failed cross-display landing — the same public-AX write, aimed back.
@@ -641,7 +630,7 @@ public enum Carry {
     /// Cursor drift still aborts; `.aborted` ⇒ the caller drops + halts.
     private static func carryHeld(displayIndex: Int, toIndex: Int, fromIndex: Int, toGlobal: Int,
                                   shortcuts: Shortcuts, cid: CGSConnectionID,
-                                  parked: inout CGPoint) async -> CarryOutcome {
+                                  parked: inout CGPoint) async -> StepOutcome {
         if let jump = shortcuts.switchTo(toGlobal) {
             postKeyChord(jump.keyCode, flags: jump.flags)
             let switched = await poll(displayIdx: displayIndex, until: { $0 == toIndex }, cid: cid, timeout: 2.5)
@@ -649,7 +638,7 @@ public enum Carry {
             try? await Task.sleep(for: .milliseconds(300))
             if drifted(from: parked) { return .aborted(.userInterrupt) }
             try? await Task.sleep(for: .milliseconds(300))
-            return .carried
+            return .switched
         }
         let right = toIndex > fromIndex
         guard let step = right ? shortcuts.moveRight : shortcuts.moveLeft, step.isEnabled else { return .failed(.unreachableShortcut) }
@@ -662,7 +651,7 @@ public enum Carry {
             if drifted(from: parked) { return .aborted(.userInterrupt) }
             try? await Task.sleep(for: .milliseconds(450))
         }
-        return cur == toIndex ? .carried : .failed(.spaceSwitchFailed)
+        return cur == toIndex ? .switched : .failed(.spaceSwitchFailed)
     }
 
     // MARK: - Navigation (unheld view moves — the grab-leg)
@@ -894,41 +883,98 @@ public enum Carry {
     /// interval), so a window that settles at the very end is not failed on a technicality — that would
     /// re-introduce the sign-flipped defect the first cold review caught here.
     ///
-    /// `matchedAtMillis` is the elapsed time of the FIRST of the two matching reads. It exists to be logged:
-    /// a success that prints no observation cannot be checked by anyone, which is how the optimism above
-    /// survived a review and a human verify. If real matches cluster at 0ms this gap is wide open; if they
-    /// cluster at 300-600ms it was mostly theoretical. Nobody knows yet — that is why it is measured.
-    private static func frameSettled(
-        _ cap: CapturedWindow, tolerance: Int = Restore.frameTolerance, timeout: Double = 1.2
-    ) async -> (held: Bool, seen: WindowFrame?, matchedAtMillis: Int?) {
-        func read() -> WindowFrame? {
-            onScreenBounds(cap.cgWindowId).map {
-                WindowFrame(x: Int($0.minX), y: Int($0.minY), w: Int($0.width), h: Int($0.height))
-            }
+    /// THE PROOF IS THE TYPE (#keeps-23, 2nd engineering pass). Three call sites each hand-maintained their
+    /// own place-then-verify pair, and correctness rested on all three remembering. `init` here is `private`,
+    /// so — Swift scoping `private` to the enclosing *declaration*, which is this struct and not `Carry` —
+    /// nothing outside can build a `FrameHeld`; `verify` is the only thing that does, and it polls the real
+    /// window to do it. Since `CarryOutcome.carried` now carries one, **a place path cannot report success
+    /// without a read-back: it does not compile.** That is the whole point of the fold. Sharing a helper
+    /// would have made the three paths consistent and left a fourth free to skip it — which is exactly what
+    /// this codebase keeps doing (#keeps-5 twice, #keeps-23 once), each time caught by a reviewer rather than
+    /// by the code. Vigilance was the control; construction is the control now.
+    ///
+    /// WHAT THE SEAL DOES NOT COVER, stated because an unstated scope is how the last three got through:
+    /// it makes success-without-a-read-back unrepresentable, not success-with-the-wrong-window's-read-back.
+    /// A path holding a `FrameHeld` obtained for a different window could still pass it along. Nothing does
+    /// — so KEEP `verifyPlacement` the proof's only consumer, obtaining and spending it in one expression.
+    /// (Stated as the contract to hold, not as a fact about today's arrangement: a comment claiming "X is the
+    /// only path that…" goes stale the moment someone adds a second, and four of six findings in the
+    /// 2026-07-29 second-model review were exactly that shape.) Closing this too would mean carrying the
+    /// `cgWindowId` in the proof and checking it, which buys nothing while the contract holds. The claim is
+    /// bounded on purpose: "cannot skip the read", not "cannot be fooled".
+    ///
+    /// Verified, not assumed (2026-07-29): a deliberate probe adding `return .carried(FrameHeld(seen:…))` to
+    /// `executePlaceOnly` — a fourth path faking success — failed to compile with
+    /// "'Carry.FrameHeld' initializer is inaccessible due to 'private' protection level", then was removed.
+    private struct FrameHeld {
+        /// The frame actually observed on the confirming read — a real one, never "nothing on screen": a
+        /// window that vanished cannot match, so it cannot reach this initializer.
+        let seen: WindowFrame
+        /// Elapsed ms of the FIRST of the two matching reads. It exists to be logged: a success that prints
+        /// no observation cannot be checked by anyone, which is how the optimism above survived a review and
+        /// a human verify. If real matches cluster at 0ms this gap is wide open; if they cluster at
+        /// 300-600ms it was mostly theoretical. Run 1 (2026-07-29) read 0ms on all seven successes.
+        let matchedAtMillis: Int
+
+        private init(seen: WindowFrame, matchedAtMillis: Int) {
+            self.seen = seen
+            self.matchedAtMillis = matchedAtMillis
         }
-        var seen: WindowFrame?
-        var firstMatchAt: Double?
-        var waited = 0.0
-        while true {
-            seen = read()
-            if seen.map({ cap.frame.matches($0, tolerance: tolerance) }) ?? false {
-                if let first = firstMatchAt { return (true, seen, Int(first * 1000)) }  // confirmed
-                firstMatchAt = waited  // provisional — confirm it on the next tick
-            } else {
-                firstMatchAt = nil  // drifted (or vanished): any streak is broken
+
+        /// The sole way to obtain a `FrameHeld` — poll until two consecutive reads match, or give up.
+        /// Returns the last frame observed either way, so a caller can log what it actually got on a miss
+        /// without paying a second read.
+        static func verify(
+            _ cap: CapturedWindow, tolerance: Int = Restore.frameTolerance, timeout: Double = 1.2
+        ) async -> (held: FrameHeld?, lastSeen: WindowFrame?) {
+            func read() -> WindowFrame? {
+                Carry.onScreenBounds(cap.cgWindowId).map {
+                    WindowFrame(x: Int($0.minX), y: Int($0.minY), w: Int($0.width), h: Int($0.height))
+                }
             }
-            if waited >= timeout, firstMatchAt == nil { break }
-            try? await Task.sleep(for: .milliseconds(150))
-            waited += 0.15
+            var seen: WindowFrame?
+            var firstMatchAt: Double?
+            var waited = 0.0
+            while true {
+                seen = read()
+                if let now = seen, cap.frame.matches(now, tolerance: tolerance) {
+                    if let first = firstMatchAt {   // confirmed — two in a row, one interval apart
+                        return (FrameHeld(seen: now, matchedAtMillis: Int(first * 1000)), now)
+                    }
+                    firstMatchAt = waited  // provisional — confirm it on the next tick
+                } else {
+                    firstMatchAt = nil  // drifted (or vanished): any streak is broken
+                }
+                if waited >= timeout, firstMatchAt == nil { break }
+                try? await Task.sleep(for: .milliseconds(150))
+                waited += 0.15
+            }
+            return (nil, seen)
         }
-        return (false, seen, nil)
     }
 
-    /// What a verified place actually observed, for the success log line — see `frameSettled`'s note on why
-    /// a success that prints nothing is unfalsifiable. Mirrors `frameNote`, which does the same for failures.
-    private static func heldNote(_ seen: WindowFrame?, _ matchedAtMillis: Int?) -> String {
-        let held = seen.map { "\($0.w)×\($0.h) at (\($0.x),\($0.y))" } ?? "nothing on screen"
-        return "holds \(held), matchedAt \(matchedAtMillis.map(String.init) ?? "?")ms"
+    /// The ONE tail every place path ends on. `prefix` is the path's own context (which window, which
+    /// desktop, what it already verified); the verdict half is written here so all three report identically
+    /// and a fourth path gets the same line for free. Success is only constructible here — see `FrameHeld`.
+    private static func verifyPlacement(_ cap: CapturedWindow, _ prefix: String,
+                                        verb: String) async -> CarryOutcome {
+        let (held, lastSeen) = await FrameHeld.verify(cap)
+        guard let held else {
+            log.info(
+                "\(prefix, privacy: .public) but frame drifted back: \(Carry.frameNote(cap, lastSeen), privacy: .public) → frameNotHeld")
+            return .failed(.frameNotHeld)
+        }
+        log.info(
+            "\(prefix, privacy: .public) frameVerified \(Carry.heldNote(held), privacy: .public) → \(verb, privacy: .public)")
+        return .carried(held)
+    }
+
+    /// What a verified place actually observed, for the success log line — see `FrameHeld`'s note on why a
+    /// success that prints nothing is unfalsifiable. Mirrors `frameNote`, which does the same for failures.
+    /// It takes the proof rather than optionals, so the old "nothing on screen"/"?ms" fallbacks are gone:
+    /// they were representable but unreachable, and a success line can no longer claim it saw nothing.
+    private static func heldNote(_ held: FrameHeld) -> String {
+        "holds \(held.seen.w)×\(held.seen.h) at (\(held.seen.x),\(held.seen.y)), matchedAt \(held.matchedAtMillis)ms"
     }
 
     /// One-line "wanted X, saw Y" for the frame-verify log lines — so a `frameNotHeld` says what happened.
