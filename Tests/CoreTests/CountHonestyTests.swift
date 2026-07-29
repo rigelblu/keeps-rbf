@@ -11,15 +11,22 @@
 // discipline: the bug lived on the I/O side of the seam, where no test could reach it).
 //
 // (a) has NO pure decision worth a test of its own. Its rule is `WindowFrame.matches(tolerance: 2)` — already
-// pinned below as the acceptance bar, so the INTENT is recorded — wrapped in `Carry.frameSettled`, which is
-// private, async, and does CGWindowList I/O against a live window server. What cannot be asserted here is
-// that every place path actually calls it. That is host behavior with no host test target, exactly like
-// #keeps-20's persistence gap, and it is verified by the human scenario in the ship-plan entry instead:
-// verdict count == the number of windows whose frame actually changed, measured by --print before/after.
-// Saying so plainly beats a test named for a guarantee it does not provide (the #keeps-21 lesson).
+// pinned below as the acceptance bar, so the INTENT is recorded — wrapped in `Carry.FrameHeld.verify`, which
+// is private, async, and does CGWindowList I/O against a live window server. Whether a real window actually
+// holds a real frame is still not assertable here, and is verified by the human scenario in the ship-plan
+// entry instead: verdict count == the number of windows whose frame actually changed, measured by --print
+// before/after. Saying so plainly beats a test named for a guarantee it does not provide (#keeps-21's lesson).
 //
-// THE COLD REVIEW PROVED THAT GAP IS NOT THEORETICAL (2026-07-28). Its finding 1 was a real defect in
-// `frameSettled`'s loop: reads landed at t≈0/150/300/450ms and the loop then slept a final 150ms and exited
+// ONE HALF OF THAT GAP CLOSED, and not by a test (#keeps-23 2nd engineering pass). This header used to say
+// "what cannot be asserted here is that every place path actually calls it". That is now enforced by the
+// compiler rather than asserted by anyone: `CarryOutcome.carried` carries a `FrameHeld`, whose initializer is
+// private to itself, so a place path cannot report success without a read-back — it does not compile. Proven
+// by a deliberate probe, not assumed (see `FrameHeld`'s doc). The residual gap is narrower and worth naming
+// exactly: the compiler guarantees the read HAPPENS, not that the window keeps the frame afterwards.
+//
+// THE COLD REVIEW PROVED THAT GAP IS NOT THEORETICAL (2026-07-28). Its finding 1 was a real defect in the
+// verify loop (then `frameSettled`, now `FrameHeld.verify`): reads landed at t≈0/150/300/450ms and the loop
+// then slept a final 150ms and exited
 // WITHOUT re-reading, so a 600ms budget observed 450ms. An app settling at ~500ms would have had an honest
 // success reported `frameNotHeld` — this slice's own defect class, sign flipped. **No test here would have
 // caught it**, and none added since does: it is loop-timing over live CGWindowList I/O, and catching it needs
