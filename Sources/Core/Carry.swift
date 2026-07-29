@@ -61,6 +61,11 @@ public enum Carry {
         case spaceSwitchFailed     // the decoded shortcut did not switch the target display's Space
         case membershipMismatch    // Space switched and mouse released, but membership did not land on target
         case axPlaceFailed         // membership landed, but the final public-AX frame placement failed
+        // #keeps-23: the AX set was ACCEPTED and membership verified, but the window does not hold the
+        // captured frame afterwards. Distinct from `axPlaceFailed`, which is the set itself being refused —
+        // this is the set succeeding and the window ending up somewhere else anyway, which is the shape that
+        // used to be reported as success (Safari's status bar, 2026-07-28 dogfood: `340x20` asked, `151x20` held).
+        case frameNotHeld
         case userInterrupt         // physical mouse movement interrupted the run
     }
 
@@ -175,8 +180,11 @@ public enum Carry {
     /// bindings. Order matters: target resolves → current resolves → not already there → both legs navigable.
     /// `tolerance` must track `Restore.decide`'s default — the two classifiers deciding "already home"
     /// differently is precisely the `#keeps-22` defect, so they compare frames the same way or not at all.
+    /// It now literally IS that default (`Restore.frameTolerance`) rather than a matching magic number kept
+    /// in step by this comment: the cold review pointed out that a warning about drift, guarded only by
+    /// convention, is not a guard.
     public static func plan(deferred: [DeferredWindow], spaceIndex: DesktopIndex, shortcuts: Shortcuts,
-                            tolerance: Int = 2) -> [CarryAction] {
+                            tolerance: Int = Restore.frameTolerance) -> [CarryAction] {
         deferred.map { dw in
             let cap = dw.captured
             if cap.sticky || cap.spaceIds.count != 1 { return .skip(.stickyAllDesktops, cap) }
@@ -429,7 +437,26 @@ public enum Carry {
                 "place wid=\(cap.cgWindowId) MOVED SPACE \(onGlobal)→\(landedNote); \(note) → membershipMismatch")
             return .failed(.membershipMismatch)
         }
-        log.info("place wid=\(cap.cgWindowId) on=\(onGlobal) axPlaced=true membershipVerified → PLACED")
+        // #keeps-23: membership is verified, but this path exists SOLELY to fix a drifted frame (#keeps-22) —
+        // so the frame is the whole deliverable, and reporting success without reading it back is reporting
+        // success about the one thing never checked. Restitution is deliberately NOT attempted here: unlike
+        // the wrong-Space case above, the window is on its OWN Space — the Space was never the problem here.
+        //
+        // REVIEW FIX (finding 4): the first version of this comment justified that with "leaving it where it
+        // is beats a second AX set the app will refuse too", and both halves were false. `preBounds` is a
+        // geometry the app demonstrably held, so restituting to it would not be refused. And nothing is
+        // "left where it is": `posOK` was required to reach this guard, so the window DID move to the
+        // captured position and merely clamped its size. The honest reason to skip restitution is that
+        // captured-position-with-clamped-size is nearer home than undoing the move — and on the two carry
+        // paths, restituting to `preBounds` would throw away the successful Space move to fix a size.
+        let placeHeld = await frameSettled(cap)
+        guard placeHeld.held else {
+            log.info(
+                "place wid=\(cap.cgWindowId) on=\(onGlobal) axPlaced=true membershipVerified but frame drifted back: \(Carry.frameNote(cap, placeHeld.seen), privacy: .public) → frameNotHeld")
+            return .failed(.frameNotHeld)
+        }
+        log.info(
+            "place wid=\(cap.cgWindowId) on=\(onGlobal) axPlaced=true membershipVerified frameVerified → PLACED")
         return .carried
     }
 
@@ -519,7 +546,16 @@ public enum Carry {
             log.info("carry wid=\(cap.cgWindowId) landedOn=\(landedOn ?? -1) target=\(toGlobal) axPlaced=false → axPlaceFailed")
             return .failed(.axPlaceFailed)
         }
-        log.info("carry wid=\(cap.cgWindowId) landedOn=\(landedOn ?? -1) target=\(toGlobal) axPlaced=true → CARRIED")
+        // #keeps-23: same-display carry — the Space move landed and the AX set was accepted, but neither
+        // proves the window holds the captured frame. Verify it before this counts as carried.
+        let carryHeld = await frameSettled(cap)
+        guard carryHeld.held else {
+            log.info(
+                "carry wid=\(cap.cgWindowId) landedOn=\(landedOn ?? -1) target=\(toGlobal) axPlaced=true but frame drifted back: \(Carry.frameNote(cap, carryHeld.seen), privacy: .public) → frameNotHeld")
+            return .failed(.frameNotHeld)
+        }
+        log.info(
+            "carry wid=\(cap.cgWindowId) landedOn=\(landedOn ?? -1) target=\(toGlobal) axPlaced=true frameVerified → CARRIED")
         return .carried
     }
 
@@ -574,7 +610,18 @@ public enum Carry {
             log.info("carry wid=\(cap.cgWindowId) cross-display landedOn=\(landedOn ?? -1) target=\(toGlobal) → membershipMismatch\(restitutionNote, privacy: .public)")
             return .failed(.membershipMismatch)
         }
-        log.info("carry wid=\(cap.cgWindowId) cross-display landedOn=\(toGlobal) → CARRIED")
+        // #keeps-23, third place path. The header claims membership verification gates every path; the frame
+        // now does too. This one is covered deliberately rather than "because it looked similar" — the
+        // repeated lesson on this codebase (#keeps-5, twice) is that a claim traced down one path of several
+        // reads as proven and isn't. Restitution is skipped for the same reason as `executePlaceOnly`: the
+        // window is on the right Space and nothing is damaged, so a refused geometry is reported, not re-fought.
+        let crossHeld = await frameSettled(cap)
+        guard crossHeld.held else {
+            log.info(
+                "carry wid=\(cap.cgWindowId) cross-display landedOn=\(toGlobal) but frame drifted back: \(Carry.frameNote(cap, crossHeld.seen), privacy: .public) → frameNotHeld")
+            return .failed(.frameNotHeld)
+        }
+        log.info("carry wid=\(cap.cgWindowId) cross-display landedOn=\(toGlobal) frameVerified → CARRIED")
         return .carried
     }
 
@@ -798,6 +845,68 @@ public enum Carry {
         let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1
         log.info("raise wid=\(cap.cgWindowId) activated=\(activated) frontmostPid=\(frontmost) targetPid=\(livePid)")
         return true
+    }
+
+    /// #keeps-23 — did the window actually TAKE the frame we set? Every place path **in this file** used to
+    /// report success on the strength of the AX set returning `.success` plus Space membership landing;
+    /// neither says anything about where the window ended up. Safari's link-preview strip proved the gap live
+    /// (2026-07-28): asked for `340x20`, logged `axPlaced=true membershipVerified → PLACED`, held `151x20`.
+    ///
+    /// SCOPE, stated because the first draft of this comment did not (cold review, finding 2): "every place
+    /// path" means the carry's three. `Restore.restore`'s own apply path counts `applied += 1` on
+    /// `setFrame`'s `posOK` alone and has NO read-back, so a reachable window whose app clamps its size is
+    /// still counted restored there, every run. That gap is real, is NOT closed by this change, and is
+    /// tracked as `#keeps-28` — it needs its own slice because `Restore.restore` runs synchronously on the
+    /// main thread (`main.swift:462`), so a per-window polled read-back would freeze the menu bar for
+    /// seconds across a full layout. An unenumerated path left unnamed is this repo's most-repeated mistake;
+    /// naming it here is the minimum, not the fix.
+    ///
+    /// The bar is `WindowFrame.matches(tolerance:)` — position AND size, the same predicate `Restore.decide`
+    /// uses for `alreadyCorrect`. That is deliberate and it overrules `Restore.setFrame`'s "size is
+    /// best-effort" doc: if `decide` calls a window within ±2 already home, a place landing outside ±2 has
+    /// not brought it home, and one standard has to mean one thing. Position-only was not an option — the
+    /// Safari case drifted in width at an identical position, so it would have passed.
+    ///
+    /// POLLED, not read once, for the same reason `#keeps-17`'s membership check had to be (Tom hit that live,
+    /// 2026-07-06): an AX set lands asynchronously, and an immediate read races it and fails a place that
+    /// actually worked. Reads back through `onScreenBounds` — CGWindowList bounds, the same coordinate source
+    /// capture used, which `WindowFrame.matches` requires of both sides or the compare is meaningless.
+    /// Returns the last frame seen so the caller can log what it got, not merely that it disagreed.
+    /// REVIEW FIX (cold review, 2026-07-28, finding 1): the first version read at t≈0/150/300/450ms, then
+    /// slept a final 150ms and exited **without re-reading** — so it advertised a 600ms budget and actually
+    /// observed 450ms, with the last sleep pure dead time. Both neighbouring pollers (`poll`,
+    /// `pollWindowGlobal`) do a post-loop read; this one broke the file's own pattern. The consequence was
+    /// this slice's own defect class with the sign flipped: an app settling at ~500ms (animated resize,
+    /// `AXEnhancedUserInterface` hosts) would have had an honest success reported `frameNotHeld`, and the log
+    /// line would have quoted a stale 450ms frame as what it "holds". Now mirrors `pollWindowGlobal`.
+    private static func frameSettled(
+        _ cap: CapturedWindow, tolerance: Int = Restore.frameTolerance, timeout: Double = 1.2
+    ) async -> (held: Bool, seen: WindowFrame?) {
+        func read() -> WindowFrame? {
+            onScreenBounds(cap.cgWindowId).map {
+                WindowFrame(x: Int($0.minX), y: Int($0.minY), w: Int($0.width), h: Int($0.height))
+            }
+        }
+        var seen: WindowFrame?
+        var waited = 0.0
+        while waited < timeout {
+            seen = read()
+            if let s = seen, cap.frame.matches(s, tolerance: tolerance) { return (true, s) }
+            try? await Task.sleep(for: .milliseconds(150))
+            waited += 0.15
+        }
+        // The read the old loop never took. Also widened 0.6 → 1.2s: the reviewer's point that 450ms was the
+        // tightest observation window in a file where membership alone gets a 500ms sleep plus a 3s poll.
+        // Erring long costs a stalled second on a genuine failure; erring short reports working software broken.
+        seen = read() ?? seen
+        return (seen.map { cap.frame.matches($0, tolerance: tolerance) } ?? false, seen)
+    }
+
+    /// One-line "wanted X, saw Y" for the frame-verify log lines — so a `frameNotHeld` says what happened.
+    private static func frameNote(_ cap: CapturedWindow, _ seen: WindowFrame?) -> String {
+        let want = "\(cap.frame.w)×\(cap.frame.h) at (\(cap.frame.x),\(cap.frame.y))"
+        let got = seen.map { "\($0.w)×\($0.h) at (\($0.x),\($0.y))" } ?? "nothing on screen"
+        return "wanted \(want), holds \(got)"
     }
 
     /// The window's current on-screen frame, by cgWindowId (the grab-leg verify: is its frame valid after nav?).
