@@ -72,10 +72,23 @@ public enum Restore {
       reachable: false, minimized: false, liveSpaceCount: 0, liveFrame: nil, identityOK: false)
   }
 
-  /// The px slack at which two frames are "the same window position". ONE definition, because three
-  /// independent `= 2` defaults (here, `Carry.plan`, `Carry.frameSettled`) were tracked by convention only —
-  /// and `Carry.plan`'s own comment warns that exactly this drift "is precisely the #keeps-22 defect", where
-  /// two classifiers disagreeing about the same window WAS the bug. Named by the cold review, 2026-07-28.
+  /// The px slack at which two frames are "the same window position" — the ONE definition.
+  ///
+  /// THE RULE, which is the part to preserve: every `tolerance` parameter in this codebase defaults to THIS
+  /// constant. One carrying its own literal is a fork, and a fork lets two classifiers disagree about the
+  /// same window — which IS the #keeps-22 defect, as `Carry.plan`'s own comment warns.
+  ///
+  /// Stated as a rule rather than a census, because a census rots. Worth knowing that the constant was
+  /// introduced by the first cold review (2026-07-28) and was ITSELF forked: it missed `classify` and
+  /// `restore` — the two on the production call path, where the literals then WON because every call site
+  /// omits the argument. So it reached only `Carry`, and raising it would have moved the carry's bar while
+  /// restore stayed at 2: the drift it exists to prevent, wearing its cure. Two second-model reviewers found
+  /// that independently, 2026-07-29.
+  ///
+  /// The parameters deliberately SURVIVE rather than being deleted as dead surface. A knob carrying its own
+  /// literal is a fork; the same knob defaulting to this constant is a seam — and the seam is what makes the
+  /// invariant testable (`CountHonestyTests.bothClassifiersAgreeAtAnyTolerance`). That test is the guard;
+  /// this constant only makes the defaults honest.
   public static let frameTolerance = 2
 
   /// The restore filter, as one pure function. Order matters: cheapest/most-decisive rejects first.
@@ -219,7 +232,7 @@ public enum Restore {
   /// mutations, on the exact path this feature exists to make safe. A miss must be `gone`, and now cannot be
   /// anything else.
   static func classify(
-    _ snapshot: Snapshot, against live: LiveState, tolerance: Int = 2,
+    _ snapshot: Snapshot, against live: LiveState, tolerance: Int = Restore.frameTolerance,
     remap: [CGWindowID: CGWindowID]? = nil
   ) -> [(CapturedWindow, Action)] {
     snapshot.windows.map { cap in
@@ -296,7 +309,9 @@ public enum Restore {
   /// Read back `snapshot` and place each captured window where it was, via public AX (silent). `apply == false`
   /// is a DRY RUN — it plans and counts but moves nothing (the safe default). Only windows reachable on an
   /// active desktop are placed; background-desktop matches are counted `deferredBackground` for #keeps-12.
-  public static func restore(_ snapshot: Snapshot, apply: Bool, tolerance: Int = 2) -> Result {
+  public static func restore(
+    _ snapshot: Snapshot, apply: Bool, tolerance: Int = Restore.frameTolerance
+  ) -> Result {
     guard let live = gatherLiveState() else {  // SkyLight load failed → act on nothing (M4)
       return Result(
         planned: 0, applied: 0, failures: 0, skips: [:], outcomes: [], dryRun: !apply,
@@ -493,9 +508,9 @@ public enum Restore {
     return Existence(ids: ids, frames: frames, owners: owners, normalLayer: normalLayer)
   }
 
-  /// Lift one captured window's live state into a pure `Match` (nil ⇒ gone). The space lookup is lazy — done
-  /// only for matched-but-not-reachable windows, where it discriminates a background desktop (1 space) from
-  /// minimized/junk (0 spaces, the M1 fix) — never for the hundreds the reachable set already covers.
+  /// Lift one captured window's live state into a pure `Match` (nil ⇒ gone).
+  /// Costs one CGS Space read per matched window, both branches — see the call site for why the reachable
+  /// branch asks the window its Space instead of inferring it from the display under its frame (#keeps-23).
   private static func matchFor(
     _ cap: CapturedWindow, live: LiveState, remap: [CGWindowID: CGWindowID]? = nil
   ) -> Match? {

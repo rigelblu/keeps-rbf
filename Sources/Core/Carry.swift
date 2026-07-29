@@ -440,15 +440,14 @@ public enum Carry {
         // #keeps-23: membership is verified, but this path exists SOLELY to fix a drifted frame (#keeps-22) —
         // so the frame is the whole deliverable, and reporting success without reading it back is reporting
         // success about the one thing never checked. Restitution is deliberately NOT attempted here: unlike
-        // the wrong-Space case above, the window is on its OWN Space — the Space was never the problem here.
+        // the wrong-Space case above, the window is on its OWN Space — the Space was never the problem.
+        // Undoing to `preBounds` would trade a possibly-partial success for a certain one, and on the two
+        // carry paths it would discard a good Space move to fix a size.
         //
-        // REVIEW FIX (finding 4): the first version of this comment justified that with "leaving it where it
-        // is beats a second AX set the app will refuse too", and both halves were false. `preBounds` is a
-        // geometry the app demonstrably held, so restituting to it would not be refused. And nothing is
-        // "left where it is": `posOK` was required to reach this guard, so the window DID move to the
-        // captured position and merely clamped its size. The honest reason to skip restitution is that
-        // captured-position-with-clamped-size is nearer home than undoing the move — and on the two carry
-        // paths, restituting to `preBounds` would throw away the successful Space move to fix a size.
+        // What this does NOT claim is which HALF of the frame failed. `posOK` means AX ACCEPTED the position
+        // write, and "accepted ≠ held" is this slice's whole premise — so it cannot prove the window reached
+        // the captured position and merely clamped its size. `placeHeld.seen` is the only thing that could
+        // say; the log line prints it, and nothing acts on it. See #keeps-29.
         let placeHeld = await frameSettled(cap)
         guard placeHeld.held else {
             log.info(
@@ -456,7 +455,7 @@ public enum Carry {
             return .failed(.frameNotHeld)
         }
         log.info(
-            "place wid=\(cap.cgWindowId) on=\(onGlobal) axPlaced=true membershipVerified frameVerified → PLACED")
+            "place wid=\(cap.cgWindowId) on=\(onGlobal) axPlaced=true membershipVerified frameVerified \(Carry.heldNote(placeHeld.seen, placeHeld.matchedAtMillis), privacy: .public) → PLACED")
         return .carried
     }
 
@@ -555,7 +554,7 @@ public enum Carry {
             return .failed(.frameNotHeld)
         }
         log.info(
-            "carry wid=\(cap.cgWindowId) landedOn=\(landedOn ?? -1) target=\(toGlobal) axPlaced=true frameVerified → CARRIED")
+            "carry wid=\(cap.cgWindowId) landedOn=\(landedOn ?? -1) target=\(toGlobal) axPlaced=true frameVerified \(Carry.heldNote(carryHeld.seen, carryHeld.matchedAtMillis), privacy: .public) → CARRIED")
         return .carried
     }
 
@@ -613,15 +612,19 @@ public enum Carry {
         // #keeps-23, third place path. The header claims membership verification gates every path; the frame
         // now does too. This one is covered deliberately rather than "because it looked similar" — the
         // repeated lesson on this codebase (#keeps-5, twice) is that a claim traced down one path of several
-        // reads as proven and isn't. Restitution is skipped for the same reason as `executePlaceOnly`: the
-        // window is on the right Space and nothing is damaged, so a refused geometry is reported, not re-fought.
+        // reads as proven and isn't. Restitution is skipped as in `executePlaceOnly`, with one caveat that
+        // path doesn't carry: membership was polled BEFORE this frame read, so on `frameNotHeld` here the
+        // Space is LAST-KNOWN, not known — a drift big enough to return the window to the origin display
+        // would have re-homed it. The count stays honest either way (not counted carried); it's the Space
+        // claim that's stale. Re-polling membership on this branch belongs to #keeps-26, which owns the
+        // cross-display path.
         let crossHeld = await frameSettled(cap)
         guard crossHeld.held else {
             log.info(
                 "carry wid=\(cap.cgWindowId) cross-display landedOn=\(toGlobal) but frame drifted back: \(Carry.frameNote(cap, crossHeld.seen), privacy: .public) → frameNotHeld")
             return .failed(.frameNotHeld)
         }
-        log.info("carry wid=\(cap.cgWindowId) cross-display landedOn=\(toGlobal) frameVerified → CARRIED")
+        log.info("carry wid=\(cap.cgWindowId) cross-display landedOn=\(toGlobal) frameVerified \(Carry.heldNote(crossHeld.seen, crossHeld.matchedAtMillis), privacy: .public) → CARRIED")
         return .carried
     }
 
@@ -872,34 +875,60 @@ public enum Carry {
     /// actually worked. Reads back through `onScreenBounds` — CGWindowList bounds, the same coordinate source
     /// capture used, which `WindowFrame.matches` requires of both sides or the compare is meaningless.
     /// Returns the last frame seen so the caller can log what it got, not merely that it disagreed.
-    /// REVIEW FIX (cold review, 2026-07-28, finding 1): the first version read at t≈0/150/300/450ms, then
-    /// slept a final 150ms and exited **without re-reading** — so it advertised a 600ms budget and actually
-    /// observed 450ms, with the last sleep pure dead time. Both neighbouring pollers (`poll`,
-    /// `pollWindowGlobal`) do a post-loop read; this one broke the file's own pattern. The consequence was
-    /// this slice's own defect class with the sign flipped: an app settling at ~500ms (animated resize,
-    /// `AXEnhancedUserInterface` hosts) would have had an honest success reported `frameNotHeld`, and the log
-    /// line would have quoted a stale 450ms frame as what it "holds". Now mirrors `pollWindowGlobal`.
+    /// WHAT THIS PROVES, exactly: the window matched its captured frame on two consecutive reads one poll
+    /// interval apart. Not that it will KEEP it — "held" is a claim about the future and no finite
+    /// observation can establish it, because the owning app may re-lay-out later for reasons we cannot see.
+    ///
+    /// TWO CONSECUTIVE, not first-match-wins (second-model review, 2026-07-29). The previous version returned
+    /// the instant a read matched, which made it structurally OPTIMISTIC: it stopped looking the moment it
+    /// saw what it wanted. An app that accepts the frame and then clamps it a moment later — the `#keeps-6`
+    /// move-on-resize class this whole slice exists to catch — matched at t≈0 and was counted carried while
+    /// holding a size it never accepted. The fix deliberately introduces NO new constant: it reuses the 150ms
+    /// tick already here, so there is one budget to reason about rather than two magic numbers.
+    ///
+    /// It rounds toward FALSE NEGATIVE on purpose. The two error directions are not symmetric — reporting
+    /// "brought back" for a window that isn't destroys the only thing this feature sells, while under-counting
+    /// a window that did come home is merely modest. When the observation is ambiguous, be modest.
+    ///
+    /// A provisional match always earns its confirming read even past the budget (bounded: one extra
+    /// interval), so a window that settles at the very end is not failed on a technicality — that would
+    /// re-introduce the sign-flipped defect the first cold review caught here.
+    ///
+    /// `matchedAtMillis` is the elapsed time of the FIRST of the two matching reads. It exists to be logged:
+    /// a success that prints no observation cannot be checked by anyone, which is how the optimism above
+    /// survived a review and a human verify. If real matches cluster at 0ms this gap is wide open; if they
+    /// cluster at 300-600ms it was mostly theoretical. Nobody knows yet — that is why it is measured.
     private static func frameSettled(
         _ cap: CapturedWindow, tolerance: Int = Restore.frameTolerance, timeout: Double = 1.2
-    ) async -> (held: Bool, seen: WindowFrame?) {
+    ) async -> (held: Bool, seen: WindowFrame?, matchedAtMillis: Int?) {
         func read() -> WindowFrame? {
             onScreenBounds(cap.cgWindowId).map {
                 WindowFrame(x: Int($0.minX), y: Int($0.minY), w: Int($0.width), h: Int($0.height))
             }
         }
         var seen: WindowFrame?
+        var firstMatchAt: Double?
         var waited = 0.0
-        while waited < timeout {
+        while true {
             seen = read()
-            if let s = seen, cap.frame.matches(s, tolerance: tolerance) { return (true, s) }
+            if seen.map({ cap.frame.matches($0, tolerance: tolerance) }) ?? false {
+                if let first = firstMatchAt { return (true, seen, Int(first * 1000)) }  // confirmed
+                firstMatchAt = waited  // provisional — confirm it on the next tick
+            } else {
+                firstMatchAt = nil  // drifted (or vanished): any streak is broken
+            }
+            if waited >= timeout, firstMatchAt == nil { break }
             try? await Task.sleep(for: .milliseconds(150))
             waited += 0.15
         }
-        // The read the old loop never took. Also widened 0.6 → 1.2s: the reviewer's point that 450ms was the
-        // tightest observation window in a file where membership alone gets a 500ms sleep plus a 3s poll.
-        // Erring long costs a stalled second on a genuine failure; erring short reports working software broken.
-        seen = read() ?? seen
-        return (seen.map { cap.frame.matches($0, tolerance: tolerance) } ?? false, seen)
+        return (false, seen, nil)
+    }
+
+    /// What a verified place actually observed, for the success log line — see `frameSettled`'s note on why
+    /// a success that prints nothing is unfalsifiable. Mirrors `frameNote`, which does the same for failures.
+    private static func heldNote(_ seen: WindowFrame?, _ matchedAtMillis: Int?) -> String {
+        let held = seen.map { "\($0.w)×\($0.h) at (\($0.x),\($0.y))" } ?? "nothing on screen"
+        return "holds \(held), matchedAt \(matchedAtMillis.map(String.init) ?? "?")ms"
     }
 
     /// One-line "wanted X, saw Y" for the frame-verify log lines — so a `frameNotHeld` says what happened.
