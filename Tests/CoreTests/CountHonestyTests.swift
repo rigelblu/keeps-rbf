@@ -107,15 +107,81 @@ import Testing
 
   // MARK: - (a) the acceptance bar a place is held to
 
-  /// The carry's frame verification uses `WindowFrame.matches(tolerance: 2)` — the SAME predicate
-  /// `Restore.decide` uses for `alreadyCorrect`. Pinned here as a decision, not an implementation detail:
-  /// "this window is home" has to mean one thing whether it got there by placement or was already there.
-  /// It also overrules `Restore.setFrame`'s "size is best-effort" doc, deliberately — see the next test.
-  @Test func theAcceptanceBarIsTheSameOneIdempotenceUses() {
+  /// What `WindowFrame.matches` means at the shared bar: ±`frameTolerance` in BOTH dimensions is jitter,
+  /// anything beyond it is drift.
+  ///
+  /// RENAMED 2026-07-29 (second-model review, found independently by two models). This was
+  /// `theAcceptanceBarIsTheSameOneIdempotenceUses` — a name claiming an equality between two subsystems,
+  /// over a body that called `matches` with a hand-typed `2` and touched NEITHER of them. It proved `abs()`
+  /// works. The sameness it was named for is now actually asserted by `bothClassifiersAgreeAtAnyTolerance`
+  /// below; this one keeps only the claim it can carry, and reads the bar from the constant so it moves
+  /// when the constant does.
+  @Test func toleranceIsPositionAndSizeAlike() {
+    let t = Restore.frameTolerance
     let want = WindowFrame(x: 9, y: 1140, w: 340, h: 20)
-    #expect(want.matches(WindowFrame(x: 9, y: 1140, w: 340, h: 20), tolerance: 2))
-    #expect(want.matches(WindowFrame(x: 10, y: 1141, w: 341, h: 21), tolerance: 2))  // ±2 jitter is not drift
-    #expect(!want.matches(WindowFrame(x: 9, y: 1140, w: 355, h: 20), tolerance: 2))
+    #expect(want.matches(WindowFrame(x: 9, y: 1140, w: 340, h: 20), tolerance: t))
+    #expect(want.matches(WindowFrame(x: 9 + t, y: 1140 + t, w: 340 + t, h: 20 + t), tolerance: t))
+    #expect(!want.matches(WindowFrame(x: 9, y: 1140, w: 340 + t + 1, h: 20), tolerance: t))
+    #expect(!want.matches(WindowFrame(x: 9 + t + 1, y: 1140, w: 340, h: 20), tolerance: t))
+  }
+
+  /// The invariant `Restore.frameTolerance` exists to protect, held as a property rather than an example:
+  /// "this window is home" means ONE thing — whether restore is deciding idempotence or the carry is
+  /// deciding there is nothing to do. Two classifiers disagreeing about one window IS the #keeps-22 defect.
+  ///
+  /// This is the test the tolerance seams were kept for (2026-07-29). The second-model review's first
+  /// finding was that `classify`/`restore` still defaulted to a literal `2` while `Carry` used the constant.
+  /// The obvious fix was to delete those parameters as dead surface; they were re-pointed at the constant
+  /// INSTEAD, specifically so this property could be stated — pass the same `t` to both classifiers and they
+  /// must agree. A knob carrying its own literal is a fork; the same knob defaulting to the constant is a seam.
+  ///
+  /// HONEST BOUNDARY, so 153 green is not mistaken for more than it covers: this pins the two PURE
+  /// classifiers to each other. It does NOT reach `Restore.classify`/`Restore.restore`'s defaults — the
+  /// layer where the drift actually was — because those need a `LiveState` and nothing in this suite can
+  /// build one. That gap is closed by wiring, and nothing here would catch it re-opening.
+  /// SWEPT, not sampled — and that is the difference between the name being true and being the next
+  /// `theAcceptanceBarIsTheSameOneIdempotenceUses`. The first draft hand-picked four tolerances, which is
+  /// four example tests wearing the word "ANY". Both classifiers are pure and trivial, so the cost argument
+  /// for sampling does not exist: 9×41 pairs on two axes run in microseconds. `@Test(arguments:)` names the
+  /// failing pair, which a `for` loop would not.
+  ///
+  /// `tolerance: 0` is swept deliberately and is NOT an endorsement of 0 as a setting. The property is
+  /// AGREEMENT, not correctness — the two classifiers must reach the same verdict at every tolerance,
+  /// including silly ones. Position and size drift sweep independently, so a classifier checking one axis
+  /// and not the other is caught; that matters because the motivating defect was a size-only drift at an
+  /// IDENTICAL position (Safari's strip, 340×20 → 151×20 at (9,1140)).
+  @Test(arguments: 0...8, 0...40)
+  func bothClassifiersAgreeAtAnyTolerance(tolerance: Int, drift: Int) {
+    let home = WindowFrame(x: 0, y: 39, w: 800, h: 600)
+
+    /// Restore's verdict on a reachable window sitting on its own captured Space: is it already home?
+    func restoreSaysHome(dx: Int, dw: Int) -> Bool {
+      let cap = Self.window(frame: home, space: "SPACE-BACKGROUND")
+      let live = WindowFrame(x: home.x + dx, y: home.y, w: home.w + dw, h: home.h)
+      let m = Restore.Match(
+        reachable: true, minimized: false, liveSpaceCount: 1, liveFrame: live,
+        currentDisplay: "DISPLAY-A", landingDisplay: "DISPLAY-A",
+        landingActiveSpace: "SPACE-ACTIVE", currentSpace: "SPACE-BACKGROUND")
+      return Restore.decide(cap, match: m, tolerance: tolerance) == .skip(.alreadyCorrect)
+    }
+
+    /// The carry's verdict on the SAME window, already on its target desktop: nothing to do?
+    func carrySaysHome(dx: Int, dw: Int) -> Bool {
+      let cap = Self.window(frame: home, space: "SPACE-BACKGROUND")
+      let live = WindowFrame(x: home.x + dx, y: home.y, w: home.w + dw, h: home.h)
+      let deferredWindow = Carry.DeferredWindow(
+        captured: cap, currentGlobalDesktop: 1, liveFrame: live)
+      let binding = Shortcuts.Binding(keyCode: 0, flags: [], isEnabled: true)
+      let shortcuts = Shortcuts(
+        switchToDesktop: Dictionary(uniqueKeysWithValues: (1...10).map { ($0, binding) }),
+        moveLeft: binding, moveRight: binding)
+      return Carry.plan(
+        deferred: [deferredWindow], spaceIndex: index, shortcuts: shortcuts, tolerance: tolerance)[0]
+        == .skip(.alreadyOnDesktop, cap)
+    }
+
+    #expect(restoreSaysHome(dx: drift, dw: 0) == carrySaysHome(dx: drift, dw: 0))  // position drift
+    #expect(restoreSaysHome(dx: 0, dw: drift) == carrySaysHome(dx: 0, dw: drift))  // size drift
   }
 
   /// THE CASE THAT MOTIVATED (a), with the real numbers. Safari's link-preview strip was asked for 340×20,
