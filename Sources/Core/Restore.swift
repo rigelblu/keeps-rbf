@@ -72,9 +72,17 @@ public enum Restore {
       reachable: false, minimized: false, liveSpaceCount: 0, liveFrame: nil, identityOK: false)
   }
 
+  /// The px slack at which two frames are "the same window position". ONE definition, because three
+  /// independent `= 2` defaults (here, `Carry.plan`, `Carry.frameSettled`) were tracked by convention only —
+  /// and `Carry.plan`'s own comment warns that exactly this drift "is precisely the #keeps-22 defect", where
+  /// two classifiers disagreeing about the same window WAS the bug. Named by the cold review, 2026-07-28.
+  public static let frameTolerance = 2
+
   /// The restore filter, as one pure function. Order matters: cheapest/most-decisive rejects first.
   /// ±tolerance on `alreadyCorrect` defeats 1px rounding thrash (Q6).
-  static func decide(_ cap: CapturedWindow, match: Match?, tolerance: Int = 2) -> Action {
+  static func decide(_ cap: CapturedWindow, match: Match?, tolerance: Int = Restore.frameTolerance)
+    -> Action
+  {
     guard let m = match else { return .skip(.gone) }  // no live window in .optionAll at all
     // #keeps-5: identity outranks every other verdict. A window we can't prove is the one we captured must not
     // be placed, deferred, or counted as carry work — deferring it is what fed an impostor to the carry, where
@@ -513,17 +521,41 @@ public enum Restore {
       guard r.identity == cap.bundleId else { return Match.impostor }
       let frame = live.existence.frames[wid]
       let landing = live.topology.displayContaining(cap.frame)  // where an AX-set would land TODAY (#keeps-17)
-      // A reachable window sits on the ACTIVE Space of the display under its live frame — its current Space
-      // resolves from the topology, no extra CGS read (#keeps-13 dogfood: Space-aware idempotence needs it).
       let current = frame.flatMap { live.topology.displayContaining($0) }
+      // #keeps-23: ASK the window which Space it is on — do not infer it from its display.
+      //
+      // This line used to read `currentSpace: current?.activeSpaceUUID`: "a reachable window sits on the
+      // ACTIVE Space of the display under its live frame", justified as saving a CGS read. The premise is
+      // this file's header claim — that AX reaches only the active desktop — and it is not reliably true.
+      // Tom's 2026-07-28 dogfood disproved it with a single window: cmux `wid=201` was AX-reachable while
+      // sitting on desktop 1 with desktop 13 active, so the inference returned desktop 13's uuid, the compare
+      // against its captured home failed, and restore called a window that was exactly home
+      // `deferredWrongSpace`. The carry, which reads `cgsSpacesForWindow` directly, called the same window
+      // `alreadyOnDesktop 1→1` in the same run. Two classifiers, one window, opposite verdicts — and the one
+      // that asked was right.
+      //
+      // `spaces.count == 1` is the same guard the not-reachable branch below carries, and for the same
+      // #keeps-15 reason: `spaces.first` on a multi-Space read is an arbitrary member, so it can "prove" a
+      // home the window is nowhere near. Anything other than exactly one Space ⇒ nil ⇒ `decide` falls back to
+      // frame-only, which is the documented fail-safe, NOT back to the display inference — re-deriving from
+      // the display here would reinstate the bug in its own fix.
+      //
+      // Cost: one CGS read per reachable window, where there were none. The saving this replaces was real but
+      // small (19 reachable windows against 30 captured on the live fleet), and it bought a wrong answer.
+      let ownSpace = live.desktopIndex.ownSpaceUUID(ofSpaces: cgsSpacesForWindow(live.cid, wid))
       return Match(
         reachable: true, minimized: r.minimized,
-        liveSpaceCount: 1,  // don't-care when reachable; decide() gates on `reachable`
+        // Still a hardcoded don't-care, deliberately: `decide` tests `liveSpaceCount == 0` for minimized
+        // BEFORE it tests `reachable`, so feeding the real count here would newly classify an AX-visible,
+        // zero-Space window as minimized. That may even be right, but it is a second behavior change riding
+        // in unannounced on a fix for a different bug — so it stays out. `ownSpace` above carries the count
+        // guard where it is actually needed.
+        liveSpaceCount: 1,
         liveFrame: frame,
         currentDisplay: current?.uuid,
         landingDisplay: landing?.uuid,
         landingActiveSpace: landing?.activeSpaceUUID,
-        currentSpace: current?.activeSpaceUUID)
+        currentSpace: ownSpace)
     }
     guard live.existence.ids.contains(wid) else { return nil }  // not in .optionAll at all ⇒ gone
     // #keeps-5 guard site 2 of 2 — the one the brief's first draft argued was harmless. It is not: an
