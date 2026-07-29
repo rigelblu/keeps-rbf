@@ -61,6 +61,23 @@ public struct DesktopIndex: Equatable {
     return nil
   }
 
+  /// #keeps-23 — the Space a window is ACTUALLY on, from its raw `cgsSpacesForWindow` membership.
+  ///
+  /// Pure on purpose, and separated from the CGS read for the reason `SessionFreshness` and `SettlePolicy`
+  /// were: the bug this exists to kill lived on the I/O side of the seam, where no test could reach it.
+  /// `Restore.matchFor` used to INFER a reachable window's Space as "the active Space of the display under
+  /// its frame" — sound only if AX never reaches across Spaces, which a single live window disproved
+  /// (cmux, 2026-07-28: reachable on desktop 1 with desktop 13 active).
+  ///
+  /// Exactly one Space or nothing. `spaces.first` on a multi-Space read is an arbitrary member — CGS
+  /// over-reports some apps — so it can "prove" a home the window is nowhere near, and the opposite ordering
+  /// proves the reverse (the #keeps-15 `spaces.first` finding). Nil means "cannot prove", which every caller
+  /// must treat as fail-safe rather than falling back to a guess.
+  public func ownSpaceUUID(ofSpaces spaces: [Int]) -> String? {
+    guard spaces.count == 1, let mid = spaces.first else { return nil }
+    return uuid(ofManagedID: mid)
+  }
+
   /// Map a 1-based GLOBAL ordinal back to (display index, 0-based per-display index) — the navigation target:
   /// which display to step, and to which of its desktops. `nil` ⇒ out of range.
   public func locate(global: Int) -> (displayIndex: Int, perDisplayIndex: Int)? {
