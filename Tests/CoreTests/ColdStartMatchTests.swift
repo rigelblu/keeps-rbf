@@ -272,8 +272,9 @@ import Testing
     // someone else's window, and one live window could be claimed TWICE (once through the map, once through a
     // colliding fallback), producing two verdicts for one window and acting on both.
     //
-    // The distinction is now a type: `remap == nil` means same session, non-nil means cold start where a miss
-    // is `gone`. This asserts the rule at `decide`'s boundary, which is where the pure matcher tests stop.
+    // The rule is now one seam: `Restore.resolveIds` produces the map for BOTH sessions (#keeps-30 — a live
+    // id maps to itself same-session, a miss is absent either way), and `matchFor` refuses anything absent.
+    // This asserts the rule at `decide`'s boundary, which is where the pure matcher tests stop.
     let unresolved = cap("com.a", id: 165, x: 0, y: 0)  // 165 is deliberately a plausible live id
     // Cold start, empty map ⇒ nothing resolves ⇒ gone, regardless of what lives at id 165.
     #expect(Restore.decide(unresolved, match: nil) == .skip(.gone))

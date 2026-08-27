@@ -219,57 +219,136 @@ public enum Restore {
 
   /// Classify every captured window against live state — each paired with its `Action`. The seam #keeps-12's
   /// carry re-runs at trigger time, then filters for `.skip(.deferredBackground)` to get its carry set.
-  /// `remap` is #keeps-5.4's cold-start substitution: captured `cgWindowId` → the live id standing in for it.
-  /// Empty in the normal same-session case, so this is the identity function and nothing about the existing
-  /// truth table changes. One substitution point is deliberately the WHOLE integration — every rule below
-  /// (reachability, Space guards, idempotence, the identity guard) then applies unmodified to a cold start.
-  /// `remap` is `nil` for a same-session run (ids are trustworthy, use them directly) and NON-NIL for a cold
-  /// start, where a captured id is dead and the map is the ONLY way to resolve it. That distinction is a
-  /// type, not a convention, because the first version used an empty dictionary and fell back to
-  /// `remap[id] ?? id` — which in a cold start hands an unresolved window its DEAD id, and ids recycle from
-  /// low numbers after a reboot, so that id routinely belongs to a live stranger. It also let one live window
-  /// be claimed twice: once legitimately through the map, once through a colliding fallback. Both wrong-window
-  /// mutations, on the exact path this feature exists to make safe. A miss must be `gone`, and now cannot be
-  /// anything else.
+  /// `remap` is the id resolution `resolveIds` produced: captured `cgWindowId` → the live id standing in for
+  /// it. One substitution point is deliberately the WHOLE integration — every rule below (reachability, Space
+  /// guards, idempotence, the identity guard) then applies unmodified whatever session the snapshot is from.
+  /// A captured id absent from the map has no live counterpart and classifies `gone` — never a raw fallback
+  /// (#keeps-5.4: after a reboot a recycled id routinely belongs to a live stranger, and a fallback also let
+  /// one live window be claimed twice). Since #keeps-30 the map is never nil: in this boot session a live id
+  /// maps to itself, so the same-session truth table is unchanged and one seam serves both sessions.
   static func classify(
     _ snapshot: Snapshot, against live: LiveState, tolerance: Int = Restore.frameTolerance,
-    remap: [CGWindowID: CGWindowID]? = nil
+    remap: [CGWindowID: CGWindowID]
   ) -> [(CapturedWindow, Action)] {
     snapshot.windows.map { cap in
       (cap, decide(cap, match: matchFor(cap, live: live, remap: remap), tolerance: tolerance))
     }
   }
 
-  /// The live ids for a cold start, lifted out of `LiveState` so `ColdStartMatch` stays pure.
-  static func coldStartRemap(_ snapshot: Snapshot, live: LiveState) -> [CGWindowID: CGWindowID] {
-    // The candidate set must be exactly "windows CAPTURE would have stored" — mirroring `Capture.decide`'s
-    // filter chain, not approximating it. The first build filtered on nothing but ownership and matched real
-    // windows to 1×1 utility windows and 1800×39 chrome, which then classified `minimized` and starved the
-    // real windows of their slots: 26 of 29 came back that way on the live fleet.
-    //
-    // Same four guards as `Capture.decide`, in the same order: attributable owner → normal layer →
-    // non-degenerate frame → occupies at least one Space. The Space read is the only costly one and runs on
-    // the cold-start path only, over candidates rather than over every window in the system.
-    let liveWindows = live.existence.normalLayer.compactMap { id -> ColdStartMatch.LiveWindow? in
-      guard let identity = live.existence.owners[id] else { return nil }  // unattributable ⇒ never a match
-      let frame = live.existence.frames[id]
-      guard
-        ColdStartMatch.isCandidate(
-          normalLayer: true,  // this set is already layer-filtered; passed explicitly so the gate is one rule
-          frame: frame,
-          hasSpace: !cgsSpacesForWindow(live.cid, id).isEmpty)
-      else { return nil }
-      return ColdStartMatch.LiveWindow(id: id, identity: identity, frame: frame)
+  // MARK: - Id resolution (#keeps-5.4 cold start, #keeps-30 same-session relaunch)
+
+  /// How a run's captured ids were resolved to live ids — the map every consumer reads, plus the counts that
+  /// make the run readable from the trace without the code. `live`/`dead`/`relaunched` are meaningful only
+  /// for a trusted session (`trustIds`); a cold start sends every id to `assign` and reports its tiers.
+  public struct IdResolution: Equatable {
+    public let map: [CGWindowID: CGWindowID]
+    public let live: Int  // captured ids still present in CGWindowList(.optionAll) — trusted as themselves
+    public let dead: Int  // captured ids absent — closed, or the app relaunched
+    public let relaunched: Int  // dead ids whose app is running under a new pid — the ones re-matched
+    public let exact: Int  // tier counts from `ColdStartMatch.assign` (#keeps-31)
+    public let position: Int
+    public let size: Int
+    public var count: Int { map.count }
+  }
+
+  /// #keeps-30: did the app that owned this captured window relaunch? True when its captured pid no longer
+  /// runs that app (dead, or recycled onto another) AND the app is running under some pid. Pure. Both sides
+  /// are `AppIdentity.encode`d, so a bundle-less app (identity `pid:N`) can never read as relaunched — its
+  /// identity died with its pid — and stays `gone`, the safe direction.
+  static func relaunched(pid: pid_t, identity: String, identities: [pid_t: String]) -> Bool {
+    identities[pid] != identity && identities.values.contains(identity)
+  }
+
+  /// Resolve every captured id to the live id that stands in for it. One function for both sessions, with
+  /// `trustIds` (= `SessionFreshness.isCurrent`) the only switch:
+  /// - `true` (this boot): a captured id still in `.optionAll` maps to itself. A dead id whose app relaunched
+  ///   (`relaunched`) goes to `ColdStartMatch.assign` over that app's UNCLAIMED live windows — never a window
+  ///   a live id already owns. A dead id whose app still runs under the captured pid is a window the user
+  ///   closed: absent from the map, `gone`, exactly as before. (The first design re-matched every dead id;
+  ///   in a session where windows open and close all day that pulls a newer window into a closed one's spot.)
+  /// - `false` (a prior boot): every id is dead — a live one may belong to a stranger (#keeps-5) — so every
+  ///   record goes to `assign`, today's cold path unchanged.
+  /// A miss is absent from the map. `spaces` is the one I/O read left inside (candidate = has a Space);
+  /// injected so the decision is testable without a relaunch and so a test can COUNT the reads: the identity
+  /// filter runs BEFORE the Space read, so a same-session run costs one CGS read per live window of the
+  /// relaunched apps only, not per normal-layer window in the system (`Restore.restore` is synchronous on the
+  /// main thread — 323 reads on the 2026-08-27 fleet if this were inverted, on every restore).
+  static func resolveIds(
+    _ snapshot: Snapshot, live: LiveState, trustIds: Bool,
+    spaces: ((CGWindowID) -> [Int])? = nil
+  ) -> IdResolution {
+    let read = spaces ?? { cgsSpacesForWindow(live.cid, $0) }
+    let ex = live.existence
+    var map: [CGWindowID: CGWindowID] = [:]
+    var toAssign: [CapturedWindow] = []
+    var liveCount = 0, deadCount = 0, relaunchedCount = 0
+    var wantedIdentities: Set<String>? = nil  // nil ⇒ every attributable normal-layer window (cold start)
+    if trustIds {
+      for cap in snapshot.windows {
+        if ex.ids.contains(cap.cgWindowId) {
+          map[cap.cgWindowId] = cap.cgWindowId
+          liveCount += 1
+        } else {
+          deadCount += 1
+          if relaunched(pid: pid_t(cap.pid), identity: cap.bundleId, identities: ex.identities) {
+            relaunchedCount += 1
+            toAssign.append(cap)
+          }
+        }
+      }
+      wantedIdentities = Set(toAssign.map(\.bundleId))
+    } else {
+      toAssign = snapshot.windows
     }
-    let assignment = ColdStartMatch.assign(captured: snapshot.windows, live: liveWindows)
-    // #keeps-31: say how each pairing was earned, so a run's guesses can be read without the code. `size` is
-    // the only true guess (same size, moved); a climbing `gone` for running apps is the number to watch.
-    DebugTrace.log(
-      "=== cold-start candidates: \(liveWindows.count) live windows survive capture's filter "
-        + "(of \(live.existence.normalLayer.count) normal-layer, \(live.existence.ids.count) total); "
-        + "resolved \(assignment.count)/\(snapshot.windows.count) by tier: exact \(assignment.exact), "
-        + "position \(assignment.position), size \(assignment.size)")
-    return assignment.map
+
+    var assignment = ColdStartMatch.Assignment(map: [:], exact: 0, position: 0, size: 0)
+    if !toAssign.isEmpty {
+      // The candidate set must be exactly "windows CAPTURE would have stored" — mirroring `Capture.decide`'s
+      // filter chain, not approximating it. The first build filtered on nothing but ownership and matched real
+      // windows to 1×1 utility windows and 1800×39 chrome, which then classified `minimized` and starved the
+      // real windows of their slots: 26 of 29 came back that way on the live fleet.
+      //
+      // Same four guards as `Capture.decide`, in the same order: attributable owner → normal layer →
+      // non-degenerate frame → occupies at least one Space. The Space read is the only costly one and runs over
+      // candidates rather than over every window in the system — and, same-session, only over the relaunched
+      // apps' windows (the identity test sits ahead of it on purpose).
+      let claimed = Set(map.values)  // live windows already owned by a trusted captured id
+      let liveWindows = ex.normalLayer.compactMap { id -> ColdStartMatch.LiveWindow? in
+        guard let identity = ex.owners[id] else { return nil }  // unattributable ⇒ never a match
+        if let wanted = wantedIdentities, !wanted.contains(identity) { return nil }
+        guard !claimed.contains(id) else { return nil }
+        let frame = ex.frames[id]
+        guard
+          ColdStartMatch.isCandidate(
+            normalLayer: true,  // this set is already layer-filtered; passed explicitly so the gate is one rule
+            frame: frame,
+            hasSpace: !read(id).isEmpty)
+        else { return nil }
+        return ColdStartMatch.LiveWindow(id: id, identity: identity, frame: frame)
+      }
+      assignment = ColdStartMatch.assign(captured: toAssign, live: liveWindows)
+      map.merge(assignment.map) { mine, _ in mine }
+      if !trustIds {
+        // #keeps-31: say how each pairing was earned, so a run's guesses can be read without the code. `size`
+        // is the only true guess (same size, moved); a climbing `gone` for running apps is the number to watch.
+        DebugTrace.log(
+          "=== cold-start candidates: \(liveWindows.count) live windows survive capture's filter "
+            + "(of \(ex.normalLayer.count) normal-layer, \(ex.ids.count) total); "
+            + "resolved \(assignment.count)/\(snapshot.windows.count) by tier: exact \(assignment.exact), "
+            + "position \(assignment.position), size \(assignment.size)")
+      }
+    }
+    if trustIds {
+      // #keeps-30: written on EVERY same-session run, dead ids or not — the line is how the next reader tells
+      // "nothing was dead" from "the resolver never ran" (grill Q3, 2026-08-27).
+      DebugTrace.log(
+        "=== ids: \(liveCount) live, \(deadCount) dead (\(relaunchedCount) relaunched) — "
+          + "resolved \(assignment.count)/\(relaunchedCount) by tier: exact \(assignment.exact), "
+          + "position \(assignment.position), size \(assignment.size)")
+    }
+    return IdResolution(
+      map: map, live: liveCount, dead: deadCount, relaunched: relaunchedCount,
+      exact: assignment.exact, position: assignment.position, size: assignment.size)
   }
 
   // MARK: - I/O sweep
@@ -330,15 +409,19 @@ public enum Restore {
     // The first shape of this was refuse-always, and dogfood killed it the day it shipped: the remedy keeps
     // offered ("Save again") would OVERWRITE the very layout being restored, because `Store.save` keeps no
     // history. Refusing was the safe half of an unfinished thought.
-    var remap: [CGWindowID: CGWindowID]? = nil  // nil ⇒ same session, ids are trustworthy
-    let coldStart = !SessionFreshness.isCurrent(snapshot)
+    //
+    // #keeps-30: the same resolver runs in THIS boot session too — a dead id whose app relaunched is
+    // re-matched the same way, instead of being trusted as `gone` while the app sits there with a new window.
+    let trustIds = SessionFreshness.isCurrent(snapshot)
+    let coldStart = !trustIds
+    let resolution = resolveIds(snapshot, live: live, trustIds: trustIds)
+    let remap = resolution.map
     if coldStart {
-      remap = coldStartRemap(snapshot, live: live)
       DebugTrace.log(
         "=== restore fp=\(snapshot.configFingerprint) COLD START — snapshot predates this boot "
-          + "(capturedAt=\(snapshot.capturedAt)); resolved \(remap?.count ?? 0)/\(snapshot.windows.count) "
+          + "(capturedAt=\(snapshot.capturedAt)); resolved \(resolution.count)/\(snapshot.windows.count) "
           + "windows by app+geometry")
-      guard !(remap ?? [:]).isEmpty else {  // nothing resolvable ⇒ the honest stop, not a bare zero
+      guard !remap.isEmpty else {  // nothing resolvable ⇒ the honest stop, not a bare zero
         return Result(
           planned: 0, applied: 0, failures: 0, skips: [:], outcomes: [], dryRun: !apply,
           readFailed: false, staleSession: true)
@@ -356,10 +439,10 @@ public enum Restore {
           + DebugTrace.displaysHeader(dbg))
     }
     for (cap, action) in classify(snapshot, against: live, tolerance: tolerance, remap: remap) {
-      // Same resolve-or-refuse rule as `matchFor`. An unresolved cold-start window never reaches a `.place`
-      // (it classified `gone`), so this only has to be self-consistent — but a raw fallback here would still
+      // Same resolve-or-refuse rule as `matchFor`. An unresolved window never reaches a `.place` (it
+      // classified `gone`), so this only has to be self-consistent — but a raw fallback here would still
       // read a stranger's frame into the trace's "before", which is how a wrong-window bug hides in plain sight.
-      let wid = coldStart ? (remap?[cap.cgWindowId] ?? 0) : cap.cgWindowId
+      let wid = remap[cap.cgWindowId] ?? 0
       let before = live.existence.frames[wid]  // the trace's "before" AND the #keeps-17 restitution target
       var label = action.label  // reclassified to a skip reason when verify-after-place restitutes (#keeps-17)
       switch action {
@@ -432,7 +515,7 @@ public enum Restore {
     return Result(
       planned: planned, applied: applied, failures: failures, skips: skips,
       outcomes: outcomes, dryRun: !apply, readFailed: false,
-      coldStart: coldStart, coldStartMatched: remap?.count ?? 0)
+      coldStart: coldStart, coldStartMatched: coldStart ? resolution.count : 0)
   }
 
   // MARK: - I/O helpers
@@ -461,6 +544,12 @@ public enum Restore {
     /// Safari's 1800×39 status-bar window at the origin, which has no Space and so classified `minimized`.
     /// 26 of 29 windows came back that way. Two sets, two questions.
     let normalLayer: Set<CGWindowID>
+    /// #keeps-30: the pid → identity map the owners above were derived from, and each window's owner pid.
+    /// Both come from reads this sweep already makes (`AppIdentity.liveMap()`, `kCGWindowOwnerPID`); the
+    /// same-session resolver needs them to tell "the app relaunched" from "the window closed", and the carry
+    /// needs the live pid so a re-matched window's log lines name the process that actually owns it.
+    let identities: [pid_t: String]
+    let ownerPids: [CGWindowID: pid_t]
   }
 
   /// Live windows reachable via public AX — i.e. on each display's ACTIVE desktop (+ minimized). Keyed by
@@ -496,6 +585,7 @@ public enum Restore {
     var frames: [CGWindowID: WindowFrame] = [:]
     var owners: [CGWindowID: String] = [:]
     var normalLayer = Set<CGWindowID>()
+    var ownerPids: [CGWindowID: pid_t] = [:]
     let identities = AppIdentity.liveMap()  // #keeps-5: one read, reused for every window below
     for info in (CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]])
       ?? []
@@ -505,31 +595,28 @@ public enum Restore {
       if let f = frame(from: info) { frames[wid] = f }
       // kCGWindowOwnerPID and kCGWindowLayer ride in the SAME dictionary this loop already reads — no
       // extra syscall for either.
-      if let pid = info[kCGWindowOwnerPID as String] as? pid_t, let id = identities[pid] {
-        owners[wid] = id
+      if let pid = info[kCGWindowOwnerPID as String] as? pid_t {
+        ownerPids[wid] = pid
+        if let id = identities[pid] { owners[wid] = id }
       }
       if (info[kCGWindowLayer as String] as? Int ?? -1) == 0 { normalLayer.insert(wid) }
     }
-    return Existence(ids: ids, frames: frames, owners: owners, normalLayer: normalLayer)
+    return Existence(
+      ids: ids, frames: frames, owners: owners, normalLayer: normalLayer, identities: identities,
+      ownerPids: ownerPids)
   }
 
   /// Lift one captured window's live state into a pure `Match` (nil ⇒ gone).
   /// Costs one CGS Space read per matched window, both branches — see the call site for why the reachable
   /// branch asks the window its Space instead of inferring it from the display under its frame (#keeps-23).
   private static func matchFor(
-    _ cap: CapturedWindow, live: LiveState, remap: [CGWindowID: CGWindowID]? = nil
+    _ cap: CapturedWindow, live: LiveState, remap: [CGWindowID: CGWindowID]
   ) -> Match? {
-    // #keeps-5.4: resolve the id, or refuse. In a cold start the captured id is DEAD, so an unresolved
-    // window has no live counterpart at all and must be `gone` (nil) — never looked up raw. Recycled ids
-    // mean a raw lookup would land on a stranger, and could also hand one live window to two captured
-    // records at once. Same-session (`remap == nil`) uses the captured id, exactly as it always has.
-    let wid: CGWindowID
-    if let remap {
-      guard let resolved = remap[cap.cgWindowId] else { return nil }  // unresolved in a cold start ⇒ gone
-      wid = resolved
-    } else {
-      wid = cap.cgWindowId
-    }
+    // #keeps-5.4: resolve the id, or refuse. An unresolved window has no live counterpart at all and must be
+    // `gone` (nil) — never looked up raw. Recycled ids mean a raw lookup would land on a stranger, and could
+    // also hand one live window to two captured records at once. Same-session, `resolveIds` mapped every
+    // live id to itself (#keeps-30), so this is the captured id exactly as it always was.
+    guard let wid = remap[cap.cgWindowId] else { return nil }  // unresolved ⇒ gone
     // #keeps-5, guard site 1 of 2 (the dangerous one): a reachable hit is placed via AX, so an id whose owner
     // has changed would silently move a stranger's window. `nil` identity ⇒ mismatch: an unattributable owner
     // is exactly the case we refuse to guess about.
