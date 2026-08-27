@@ -64,8 +64,9 @@ machine, prior art (`tplobo/restore-spaces`, killed at 14.5), and a deep researc
 
 That one fact shapes the whole product: **cross-Space restore cannot be invisible.** With SIP on (we
 never disable it), moving a window to a background Space on its own display means *visibly* switching
-there while holding the window — we hold its title bar and drive your own macOS Space-switch shortcut,
-then drop it (no synthetic dragging). Moving a window to a Space on *another* display uses a second
+there while holding the window — we press its title bar, nudge it a few pixels to prove the window is in
+our hand, drive your own macOS Space-switch shortcut, then drop it; a window that doesn't move under the
+nudge is left alone and counted. Moving a window to a Space on *another* display uses a second
 lever: switch that display's view to the target Space and place the window there via Accessibility —
 membership-verified after every move. Because all of this takes over the cursor and flips Spaces,
 keeps-rbf never springs it on you: the silent restore runs automatically, and when windows remain
