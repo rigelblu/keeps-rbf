@@ -1,7 +1,10 @@
 #!/bin/bash
 # Relaunch keeps as the packaged, signed keeps.app (#keeps-18) with the trace armed.
 #
-# RUN THIS FROM YOUR OWN TERMINAL (Warp) — never from an agent shell. Scenario 5 (2026-07-07)
+# RUN THIS FROM YOUR OWN TERMINAL (Warp) — never from an agent shell, BECAUSE this script execs the
+# inner binary. That rule is about the exec path, not about agent shells in general: an agent can
+# relaunch keeps safely with `open -n /Applications/keeps.app --env KEEPS_DEBUG=1`, since a
+# LaunchServices launch uses keeps' own TCC identity (2026-07-27, 2026-08-26). Scenario 5 (2026-07-07)
 # settled the question that used to sit open here, and it settled it the *other* way: launcher
 # attribution HOLDS for bundles on the exec path, so keeps launched below inherits the launching
 # app's Accessibility trust, not its own. An agent shell carries no AX grant, so keeps comes up
