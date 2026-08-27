@@ -91,8 +91,9 @@ public func moveCursor(to p: CGPoint) {
   postMouse(.mouseMoved, at: p, source: hidMouseSource())
 }
 
-/// Begin a title-bar hold: mouse-down on a known draggable point, with no pre-drag. Tom's #keeps-12 manual check
-/// proved a plain hold plus the real Space shortcut carries the window; membership verification is the proof.
+/// Begin a title-bar hold: mouse-down on a known draggable point. The caller follows it with `dragHeldWindow`
+/// (#keeps-26): a plain hold carries only native titlebars — Tom's #keeps-12 manual check was on those — while a
+/// custom titlebar (Zed/GPUI) starts its window move on the first drag event.
 /// Returns the parked hold point.
 @discardableResult
 public func beginWindowGrab(at p: CGPoint) -> CGPoint {
@@ -104,7 +105,7 @@ public func beginWindowGrab(at p: CGPoint) -> CGPoint {
   return p
 }
 
-/// Continue a held drag to a new point. Kept as an explicit fallback seam; the default #keeps-12 path is hold-only.
+/// Continue a held drag to a new point — the #keeps-26 proof drag, posted after `beginWindowGrab`.
 public func dragHeldWindow(to p: CGPoint) {
   postMouse(.leftMouseDragged, at: p, source: hidMouseSource())
 }

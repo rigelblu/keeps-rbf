@@ -57,6 +57,11 @@ public enum Carry {
         case gone                  // no resolvable current desktop — closed/vanished since classify
         case stickyAllDesktops     // all-desktops/pinned windows have no single Space to carry
         case noCandidateGrip       // no usable grip profile could be produced
+        // #keeps-26: the press landed and the proof drag ran, but the window did not move under it — the app
+        // never handed WindowServer the move (Zed/GPUI starts a window move on mouseDragged, and the hold-only
+        // grab never sent one). Distinct from `membershipMismatch`, which used to absorb this: that one means the
+        // Space switched and the held window still stayed; this one means nothing was ever held.
+        case gripNotTaken
         case offDisplayGrip        // grip candidates exist, but all land on a different physical display
         case spaceSwitchFailed     // the decoded shortcut did not switch the target display's Space
         case membershipMismatch    // Space switched and mouse released, but membership did not land on target
@@ -155,6 +160,24 @@ public enum Carry {
             return true
         }
         return GripProfile(candidates: unique)
+    }
+
+    /// #keeps-26 — the proof drag. After the press, the cursor is dragged this many points to the right, and
+    /// the window must follow by at least half of it before any Space switch is attempted. Right-only so a
+    /// failed proof's mouse-up lands in the titlebar beside the close button, never in its row.
+    public static let gripDrag: CGFloat = 8
+
+    /// The points the drag events are posted at — `steps` even strides ending exactly `drag` to the right.
+    public static func dragPath(from p: CGPoint, drag: CGFloat = gripDrag, steps: Int = 3) -> [CGPoint] {
+        guard steps > 0 else { return [] }
+        return (1...steps).map { i in CGPoint(x: p.x + drag * CGFloat(i) / CGFloat(steps), y: p.y) }
+    }
+
+    /// Did the grab take? The window's left edge moved right by at least half the drag. Half, not the whole:
+    /// an app that anchors the move on the FIRST drag event travels ~2/3 of a 3-step drag, and the bar must
+    /// not call that grab failed. The bar derives from the drag — there is no second constant to drift.
+    public static func gripTook(before: CGRect, after: CGRect, drag: CGFloat = gripDrag) -> Bool {
+        after.minX - before.minX >= drag / 2
     }
 
     /// Keep only candidates on the same physical display as the target window. A spanning window can contain a
@@ -500,7 +523,10 @@ public enum Carry {
         }
         var parked = initialParked
         var released = false
-        func release() { if !released { endWindowGrab(at: parked); released = true } }
+        // Release where the cursor IS, not where we parked it: on every non-abort exit the two are within the
+        // drift threshold, and on `userInterrupt` a mouse-up posted at `parked` warps the cursor back under the
+        // hand that just moved it (H6, 2026-08-27). Best-effort stands if the hand crossed displays.
+        func release() { if !released { endWindowGrab(at: cursorLocation() ?? parked); released = true } }
         defer { release() }   // FLOOR GUARANTEE: the synthetic drag is released on EVERY exit path
 
         // 3) place-leg — carry the HELD window to its target desktop (same display; the plan never emits
@@ -514,10 +540,17 @@ public enum Carry {
                 break
             case .failed(let reason):
                 log.info("carry wid=\(cap.cgWindowId) FAILED place-leg: \(reason.rawValue, privacy: .public)")
+                release()
+                // A stalled multi-step carry left the held window on an intermediate desktop, not the origin —
+                // read where it is (the same read `pollWindowGlobal` uses) before navigating back to it.
+                let whereNow = cgsSpacesForWindow(cid, cap.cgWindowId).first.flatMap { index.globalOrdinal(ofManagedID: $0) }
+                await restituteOnOrigin(cap, from: bounds, windowGlobal: whereNow ?? fromGlobal, index: index, shortcuts: shortcuts, cid: cid)
                 return .failed(reason)
             case .aborted(let reason):
                 log.info("carry wid=\(cap.cgWindowId) ABORTED (cursor drift)")
-                return .aborted(reason)   // defer releases the drag at the parked point
+                release()
+                restituteIfMoved(cap, from: bounds)   // no navigation: the user has the mouse — don't fight them
+                return .aborted(reason)
             }
         }
         // 4) commit the drag (drop), then let membership settle.
@@ -528,6 +561,8 @@ public enum Carry {
         let landedOn = await pollWindowGlobal(cap.cgWindowId, targetGlobal: toGlobal, index: index, cid: cid)
         guard landedOn == toGlobal else {
             log.info("carry wid=\(cap.cgWindowId) landedOn=\(landedOn ?? -1) target=\(toGlobal) → membershipMismatch")
+            // Navigate to where it LANDED (which may be neither origin nor target — H2 2026-08-27: `landedOn=20`).
+            await restituteOnOrigin(cap, from: bounds, windowGlobal: landedOn ?? fromGlobal, index: index, shortcuts: shortcuts, cid: cid)
             return .failed(.membershipMismatch)
         }
         // 6) place display + position + size via public AX — the window is on the target desktop now (#keeps-3 path).
@@ -618,6 +653,32 @@ public enum Carry {
     }
 
     /// Best-effort frame restitution after a failed cross-display landing — the same public-AX write, aimed back.
+    /// #keeps-26: the proof drag nudged the window `gripDrag` px; a carry that then doesn't finish puts it back.
+    /// Only when the frame actually differs — a window the drag never moved is left untouched.
+    private static func restituteIfMoved(_ cap: CapturedWindow, from bounds: CGRect) {
+        guard let now = onScreenBounds(cap.cgWindowId) else {
+            log.info("carry wid=\(cap.cgWindowId) restitution skipped: window not on screen (its desktop is not the view)")
+            return
+        }
+        guard now != bounds else { return }
+        let ok = restituteFrame(cap, to: bounds)
+        log.info("carry wid=\(cap.cgWindowId) restituted nudge \(ok ? "ok" : "FAILED", privacy: .public)")
+    }
+
+    /// A same-display carry that failed after a Space switch leaves the VIEW on the target desktop and the
+    /// window somewhere else — its origin, an intermediate desktop (a stalled step), or wherever it landed —
+    /// off-screen, unreachable by AX. Bring the view to the window's desktop first, then put the frame back.
+    /// `windowGlobal` is where the window IS, read by the caller; not where the plan assumed it would be.
+    private static func restituteOnOrigin(_ cap: CapturedWindow, from bounds: CGRect, windowGlobal: Int,
+                                          index: DesktopIndex, shortcuts: Shortcuts, cid: CGSConnectionID) async {
+        if await navigateView(toGlobal: windowGlobal, index: index, shortcuts: shortcuts, cid: cid) {
+            try? await Task.sleep(for: .milliseconds(300))
+        } else {
+            log.info("carry wid=\(cap.cgWindowId) restitution: couldn't navigate to the window's desktop \(windowGlobal)")
+        }
+        restituteIfMoved(cap, from: bounds)
+    }
+
     private static func restituteFrame(_ cap: CapturedWindow, to bounds: CGRect) -> Bool {
         guard let el = axElement(for: cap) else { return false }
         return Restore.setFrame(el, WindowFrame(x: Int(bounds.minX), y: Int(bounds.minY),
@@ -626,7 +687,8 @@ public enum Carry {
 
     /// Carry a HELD window across desktops on its current display: one global ⌥⌘N jump if the target is directly
     /// bound (proven single-jump, #keeps-6), else step desktop-by-desktop (proven multi-step, D2). The window is
-    /// held without any drag/nudge; membership verification after release proves whether the hold carried.
+    /// held after a proven drag (#keeps-26 — `grabTitlebar` only returns a grip the window followed); membership
+    /// verification after release proves whether the hold carried.
     /// Cursor drift still aborts; `.aborted` ⇒ the caller drops + halts.
     private static func carryHeld(displayIndex: Int, toIndex: Int, fromIndex: Int, toGlobal: Int,
                                   shortcuts: Shortcuts, cid: CGSConnectionID,
@@ -750,10 +812,11 @@ public enum Carry {
         return hypot(cur.x - expected.x, cur.y - expected.y) > driftThreshold
     }
 
-    /// Hold the window using a derived grip profile. The Raycast-style close-button-top point is tried first;
-    /// prototype offsets are fallback candidates when earlier geometry is unavailable or off-display. There is no
-    /// pre-drag proof; the post-release membership check is the proof that the hold carried the target window.
-    /// Returns the parked hold point if a candidate was pressed (the caller must release it).
+    /// Grab the window and PROVE the grab (#keeps-26): press the first on-display grip candidate (close-button-top,
+    /// one attempt — grill Q1), drag it `gripDrag` px right, poll the window's bounds for up to 600ms until it has
+    /// followed by half the drag (`gripTook`), and only then succeed. A window that doesn't follow is released,
+    /// restituted if it moved at all, and skipped as `gripNotTaken` — no Space switch is ever attempted for it.
+    /// Returns the last drag point as the parked hold point (the caller must release it).
     private static func grabTitlebar(_ cap: CapturedWindow, bounds: CGRect) async -> Result<CGPoint, CarrySkip> {
         let buttons = axElement(for: cap).map { axButtonFrames(for: $0) }
             ?? ChromeButtonFrames(close: nil, minimize: nil, zoom: nil)
@@ -771,9 +834,40 @@ public enum Carry {
         let p = candidate.point
         parkCursor(to: p)
         try? await Task.sleep(for: .milliseconds(120))
-        let parked = beginWindowGrab(at: p)
+        _ = beginWindowGrab(at: p)
         try? await Task.sleep(for: .milliseconds(150))
-        log.info("grab wid=\(cap.cgWindowId) source=\(candidate.source.rawValue, privacy: .public) point=(\(Int(p.x)),\(Int(p.y))) held")
+        // #keeps-26: prove the grab before anything switches. A bare mouse-down carries only apps that hand it
+        // straight to WindowServer's window-move; a custom titlebar starts the move on the first drag event.
+        // Every drag point goes through `parkCursor` so the drift-abort measures from where the cursor IS —
+        // the drag moves the hardware cursor `gripDrag` px, and `driftThreshold` is 12.
+        var parked = p
+        for q in dragPath(from: p) {
+            dragHeldWindow(to: q)
+            parkCursor(to: q)
+            parked = q
+            try? await Task.sleep(for: .milliseconds(60))
+        }
+        // Poll, don't read once: June 2026's drag-and-prove read Zed as delta=(0,0) on one run and carried it on
+        // the next with the same point — the read raced the app's move.
+        let started = ContinuousClock.now
+        var after = onScreenBounds(cap.cgWindowId)
+        var waited = 0.0
+        while waited < 0.6, !(after.map { gripTook(before: bounds, after: $0) } ?? false) {
+            try? await Task.sleep(for: .milliseconds(150)); waited += 0.15
+            after = onScreenBounds(cap.cgWindowId)
+        }
+        let took = after.map { gripTook(before: bounds, after: $0) } ?? false
+        // `moved=?` when the window vanished mid-grab — distinguishable from "didn't move" in the trace.
+        let moved = after.map { "(\(Int($0.minX - bounds.minX)),\(Int($0.minY - bounds.minY)))" } ?? "?"
+        let ms = Int((ContinuousClock.now - started) / .milliseconds(1))
+        log.info("grab wid=\(cap.cgWindowId) source=\(candidate.source.rawValue, privacy: .public) point=(\(Int(p.x)),\(Int(p.y))) proof moved=\(moved, privacy: .public) after=\(ms)ms took=\(took)")
+        guard took else {
+            endWindowGrab(at: parked)
+            // A partial move under the bar is still a move — "left where it was" has to be true. Fresh read after
+            // the mouse-up, logged — the same restitution every other non-carried exit uses.
+            restituteIfMoved(cap, from: bounds)
+            return .failure(.gripNotTaken)
+        }
         return .success(parked)
     }
 
