@@ -55,6 +55,13 @@ public enum Carry {
         case targetGone            // captured spaceUUID no longer in the live topology — its desktop was deleted
         case unreachableShortcut   // can't navigate to it — needed Switch-to-Desktop/Move-a-space is unbound
         case gone                  // no resolvable current desktop — closed/vanished since classify
+        // #keeps-30: navigated to the window's desktop, raised it, and it is not in
+        // CGWindowList(.optionOnScreenOnly) there. Used to be reported as `gone`, which claimed the window had
+        // closed — keeps cannot know that from here. Three causes shared the word: app chrome that has no AX
+        // element (Chrome's tab-hover strips, #keeps-25's class), a real window whose app listed no AX element
+        // for it (Codex 2159, 2026-08-26 22:46 — cause unknown, keeps-30.3), and a closed window. The evidence
+        // that separates them rides on the outcome (`CarryOutcome.notOnScreen(raised:)`) into the file trace.
+        case notOnScreen
         case stickyAllDesktops     // all-desktops/pinned windows have no single Space to carry
         case noCandidateGrip       // no usable grip profile could be produced
         // #keeps-26: the press landed and the proof drag ran, but the window did not move under it — the app
@@ -249,9 +256,21 @@ public enum Carry {
         public let fromGlobal: Int?
         public let toGlobal: Int?
         public let outcome: String     // "would-carry" | "carried" | "aborted" | a CarrySkip rawValue
-        init(cap: CapturedWindow, fromGlobal: Int?, toGlobal: Int?, outcome: String) {
+        // #keeps-30: what the failing site saw, when the word alone can't say — `raise=noAXElement` / `raise=ok`
+        // for `notOnScreen`. It rides here because only `Outcome` reaches the FILE trace (`traceLine` below);
+        // the `log.info` lines at the sites are os_log, which rolls in minutes.
+        public let evidence: String?
+        init(cap: CapturedWindow, fromGlobal: Int?, toGlobal: Int?, outcome: String, evidence: String? = nil) {
             bundleId = cap.bundleId; title = cap.title; cgWindowId = cap.cgWindowId
             self.fromGlobal = fromGlobal; self.toGlobal = toGlobal; self.outcome = outcome
+            self.evidence = evidence
+        }
+        static func raiseEvidence(_ raised: Bool) -> String { raised ? "raise=ok" : "raise=noAXElement" }
+        /// The `[carry:…]` line the file trace writes for this outcome — pure, so a test can pin the render.
+        public var traceLine: String {
+            "[carry:\(outcome)] \(bundleId) wid=\(cgWindowId) \"\(title ?? "")\""
+                + " — desktop \(fromGlobal.map(String.init) ?? "?")→\(toGlobal.map(String.init) ?? "?")"
+                + (evidence.map { " — \($0)" } ?? "")
         }
     }
 
@@ -292,11 +311,13 @@ public enum Carry {
         }
         // #keeps-5.4: same story as restore — a prior-session snapshot means the ids need resolving by
         // app+geometry, not that the run is refused. Refusal survives only when nothing resolves at all.
-        var remap: [CGWindowID: CGWindowID]? = nil  // nil ⇒ same session, ids are trustworthy
-        if !SessionFreshness.isCurrent(snapshot) {
-            remap = Restore.coldStartRemap(snapshot, live: live)
-            DebugTrace.log("=== carry COLD START — resolved \(remap?.count ?? 0)/\(snapshot.windows.count) windows by app+geometry")
-            guard !(remap ?? [:]).isEmpty else {
+        // #keeps-30: the same resolver runs same-session too, for dead ids whose app relaunched.
+        let trustIds = SessionFreshness.isCurrent(snapshot)
+        let resolution = Restore.resolveIds(snapshot, live: live, trustIds: trustIds)
+        let remap = resolution.map
+        if !trustIds {
+            DebugTrace.log("=== carry COLD START — resolved \(resolution.count)/\(snapshot.windows.count) windows by app+geometry")
+            guard !remap.isEmpty else {
                 return CarryResult(plannedCarries: 0, carried: 0, skips: [:], aborted: false, abortedAfter: 0,
                                    outcomes: [], dryRun: !apply, readFailed: false, navigationDead: false,
                                    staleSession: true)
@@ -322,11 +343,12 @@ public enum Carry {
             // spaceUUID — stays exactly as captured, because those are the TARGET, not the lookup key.
             // Resolve or SKIP — never fall back to the dead id. Same rule, same reason as `matchFor`: a
             // recycled id would hand this carry a stranger's window to grab and drag across Spaces.
+            // #keeps-30: the pid is rewritten too — after a relaunch the captured pid is dead, and the raise
+            // failure line (`raiseWindow`) prints `cap.pid`; a re-matched window must name its live process.
             var cap = cap
-            if let remap {
-                guard let resolved = remap[cap.cgWindowId] else { return nil }
-                cap.cgWindowId = resolved
-            }
+            guard let resolved = remap[cap.cgWindowId] else { return nil }
+            cap.cgWindowId = resolved
+            if let livePid = live.existence.ownerPids[resolved] { cap.pid = livePid }
             let currentMid = cgsSpacesForWindow(cid, cap.cgWindowId).first
             return DeferredWindow(captured: cap,
                                   currentGlobalDesktop: currentMid.flatMap { index.globalOrdinal(ofManagedID: $0) },
@@ -378,6 +400,10 @@ public enum Carry {
                 case .failed(let reason), .aborted(let reason):
                     skips[reason, default: 0] += 1
                     outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on, outcome: reason.rawValue))
+                case .notOnScreen(let raised):
+                    skips[.notOnScreen, default: 0] += 1
+                    outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on,
+                                            outcome: CarrySkip.notOnScreen.rawValue, evidence: Outcome.raiseEvidence(raised)))
                 }
             case .carry(let cap, let from, let to):
                 done += 1
@@ -400,6 +426,10 @@ public enum Carry {
                 case .failed(let reason):
                     skips[reason, default: 0] += 1
                     outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to, outcome: reason.rawValue))
+                case .notOnScreen(let raised):
+                    skips[.notOnScreen, default: 0] += 1
+                    outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to,
+                                            outcome: CarrySkip.notOnScreen.rawValue, evidence: Outcome.raiseEvidence(raised)))
                 case .aborted(let reason):
                     skips[reason, default: 0] += 1
                     aborted = true; abortedAfter = carried
@@ -409,8 +439,7 @@ public enum Carry {
         }
         if DebugTrace.enabled {   // #keeps-15: record EVERY carry outcome (incl. fail-closed) — the trace was blind to non-placements
             for o in outcomes where DebugTrace.traces(bundleId: o.bundleId, title: o.title) {
-                DebugTrace.log("[carry:\(o.outcome)] \(o.bundleId) wid=\(o.cgWindowId) \"\(o.title ?? "")\""
-                    + " — desktop \(o.fromGlobal.map(String.init) ?? "?")→\(o.toGlobal.map(String.init) ?? "?")")
+                DebugTrace.log(o.traceLine)
             }
         }
         return CarryResult(plannedCarries: total, carried: carried, skips: skips, aborted: aborted,
@@ -422,7 +451,14 @@ public enum Carry {
 
     /// `.carried` carries its evidence (#keeps-23, 2nd pass) — see `FrameHeld`. The payload is not read by
     /// the sweep, which only counts; it is here so the case cannot be written without a read-back.
-    private enum CarryOutcome { case carried(FrameHeld), failed(CarrySkip), aborted(CarrySkip) }
+    /// `.notOnScreen` (#keeps-30) is the same shape: the raise result is a non-optional payload on its own
+    /// case, so a site that reaches "not on screen after nav" cannot report it without saying whether the AX
+    /// raise found an element — the one fact that separates app chrome from a real window keeps could not
+    /// reach. A default-nil `evidence:` on `.failed` was rejected: a fourth site could omit it and compile.
+    private enum CarryOutcome {
+        case carried(FrameHeld), failed(CarrySkip), aborted(CarrySkip)
+        case notOnScreen(raised: Bool)
+    }
 
     /// The hold-leg's result, deliberately NOT `CarryOutcome`. This step proves the VIEW reached the target
     /// desktop with the window held — it says nothing about the frame, and it is consumed mid-function by
@@ -442,11 +478,11 @@ public enum Carry {
             log.info("place wid=\(cap.cgWindowId) FAILED nav: couldn't reach \(onGlobal)")
             return .failed(.unreachableShortcut)
         }
-        _ = raiseWindow(cap)
+        let raised = raiseWindow(cap)
         try? await Task.sleep(for: .milliseconds(350))
         guard let preBounds = onScreenBounds(cap.cgWindowId) else {
-            log.info("place wid=\(cap.cgWindowId) FAILED: not on screen after nav to \(onGlobal)")
-            return .failed(.gone)
+            log.info("place wid=\(cap.cgWindowId) FAILED: not on screen after nav to \(onGlobal) \(Outcome.raiseEvidence(raised), privacy: .public)")
+            return .notOnScreen(raised: raised)
         }
         guard placeFrame(cap) else {
             log.info("place wid=\(cap.cgWindowId) axPlaced=false → axPlaceFailed")
@@ -496,12 +532,12 @@ public enum Carry {
         }
         // 2) bring the exact target forward, confirm its frame after navigation, then grab it. Raising first avoids
         // sending the synthetic mouse-down into an overlapping window on crowded desktops.
-        _ = raiseWindow(cap)
+        let raised = raiseWindow(cap)
         try? await Task.sleep(for: .milliseconds(350))
         guard let bounds = onScreenBounds(cap.cgWindowId) else {
             let nowIdx = from.flatMap { liveIndex($0.displayIndex, cid) } ?? -1   // did nav land where we asked?
-            log.info("carry wid=\(cap.cgWindowId) FAILED grab-leg: not on screen after nav to \(fromGlobal); disp \(from?.displayIndex ?? -1) now at perIdx \(nowIdx) (wanted \(from?.perDisplayIndex ?? -1))")
-            return .failed(.gone)
+            log.info("carry wid=\(cap.cgWindowId) FAILED grab-leg: not on screen after nav to \(fromGlobal) \(Outcome.raiseEvidence(raised), privacy: .public); disp \(from?.displayIndex ?? -1) now at perIdx \(nowIdx) (wanted \(from?.perDisplayIndex ?? -1))")
+            return .notOnScreen(raised: raised)
         }
         log.info("carry wid=\(cap.cgWindowId) on screen at (\(Int(bounds.minX)),\(Int(bounds.minY)) \(Int(bounds.width))×\(Int(bounds.height)))")
         try? await Task.sleep(for: .milliseconds(700))   // settle the freshly-navigated desktop before grabbing

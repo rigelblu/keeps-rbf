@@ -79,6 +79,12 @@ guarantee layered on: **a silent placement never changes a window's Space.** Cro
 must prove the landing Space matches the captured one, are verified after the fact, and are restituted
 on violation; anything unprovable defers honestly to the visible carry.
 
+Window ids are handles that die with the app that owns them and with the login session. After a reboot —
+and after you quit and relaunch an app — keeps matches your saved windows to the live ones by app and
+geometry (exact frame, then same position, then same size; same app only), so a relaunched app still comes
+home without a re-Save. A window you closed while its app kept running stays closed; a relaunch at a new
+size *and* position isn't matched until the next Save.
+
 ## Status / roadmap
 
 - ✅ **Research** — established what's possible SIP-on (the constraint above)
