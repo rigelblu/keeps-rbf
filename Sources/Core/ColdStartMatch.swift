@@ -88,8 +88,9 @@ public enum ColdStartMatch {
   }
 
   /// The result of a cold-start pairing: the id map every consumer reads, plus how each pairing was earned so
-  /// a run's guesses are readable from the trace. `coldStartRemap` is the only caller; it logs the counts and
-  /// hands `map` on unchanged — nothing below `Restore.classify(remap:)` sees this type (#keeps-31).
+  /// a run's guesses are readable from the trace. `Restore.resolveIds` is the only caller — for both sessions
+  /// since #keeps-30 — it logs the counts and hands `map` on; nothing below `Restore.classify(remap:)` sees
+  /// this type (#keeps-31).
   public struct Assignment: Equatable {
     public let map: [CGWindowID: CGWindowID]
     public let exact: Int  // tier 1 — live frame within tolerance on every edge

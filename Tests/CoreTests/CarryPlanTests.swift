@@ -119,6 +119,17 @@ import Testing
     #expect(plan(deferred("d0s4", current: nil), navAll()) == .skip(.gone, cap("d0s4")))
   }
 
+  // #keeps-30: the post-navigation "not on screen" verdict carries its raise evidence onto the FILE trace line.
+  // Only `Outcome` reaches `DebugTrace`; the sites' `log.info` lines are os_log and roll in minutes.
+  @Test func evidenceOnTraceLine() {
+    let o = Carry.Outcome(cap: cap("d0s4"), fromGlobal: 3, toGlobal: 1, outcome: "notOnScreen",
+                          evidence: Carry.Outcome.raiseEvidence(false))
+    #expect(o.traceLine == "[carry:notOnScreen] com.example.app wid=1 \"t\" — desktop 3→1 — raise=noAXElement")
+    let plain = Carry.Outcome(cap: cap("d0s4"), fromGlobal: 3, toGlobal: 1, outcome: "carried")
+    #expect(plain.traceLine == "[carry:carried] com.example.app wid=1 \"t\" — desktop 3→1")
+    #expect(Carry.Outcome.raiseEvidence(true) == "raise=ok")
+  }
+
   @Test func skipsUnreachableWhenTargetNeedsUnboundShortcut() {  // global 17 needs stepping; jumpsOnly has none
     #expect(
       plan(deferred("d1s4", current: 3), jumpsOnly()) == .skip(.unreachableShortcut, cap("d1s4")))
