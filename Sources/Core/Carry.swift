@@ -268,11 +268,11 @@ public enum Carry {
                                outcomes: [], dryRun: !apply, readFailed: true, navigationDead: false)
         }
         // #keeps-5.4: same story as restore — a prior-session snapshot means the ids need resolving by
-        // app+position, not that the run is refused. Refusal survives only when nothing resolves at all.
+        // app+geometry, not that the run is refused. Refusal survives only when nothing resolves at all.
         var remap: [CGWindowID: CGWindowID]? = nil  // nil ⇒ same session, ids are trustworthy
         if !SessionFreshness.isCurrent(snapshot) {
             remap = Restore.coldStartRemap(snapshot, live: live)
-            DebugTrace.log("=== carry COLD START — resolved \(remap?.count ?? 0)/\(snapshot.windows.count) windows by app+position")
+            DebugTrace.log("=== carry COLD START — resolved \(remap?.count ?? 0)/\(snapshot.windows.count) windows by app+geometry")
             guard !(remap ?? [:]).isEmpty else {
                 return CarryResult(plannedCarries: 0, carried: 0, skips: [:], aborted: false, abortedAfter: 0,
                                    outcomes: [], dryRun: !apply, readFailed: false, navigationDead: false,

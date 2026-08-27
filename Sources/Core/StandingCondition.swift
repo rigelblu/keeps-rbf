@@ -45,7 +45,7 @@ public enum StandingCondition: Equatable, CaseIterable {
   ///
   /// NARROWED 2026-07-28, and the narrowing is the point. This first meant "the snapshot predates this boot",
   /// raised predictively on every menu open — which was a permanent nag after every reboot, for a state
-  /// `5.4` then made harmless (keeps resolves those windows by app + position and restores normally). A
+  /// `5.4` then made harmless (keeps resolves those windows by app + geometry and restores normally). A
   /// condition that fires when nothing is wrong teaches the user to ignore conditions.
   ///
   /// So it is now EVIDENCE-BASED rather than predictive: raised only after a run actually dead-ended, and
