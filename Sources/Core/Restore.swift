@@ -261,10 +261,15 @@ public enum Restore {
       else { return nil }
       return ColdStartMatch.LiveWindow(id: id, identity: identity, frame: frame)
     }
+    let assignment = ColdStartMatch.assign(captured: snapshot.windows, live: liveWindows)
+    // #keeps-31: say how each pairing was earned, so a run's guesses can be read without the code. `size` is
+    // the only true guess (same size, moved); a climbing `gone` for running apps is the number to watch.
     DebugTrace.log(
       "=== cold-start candidates: \(liveWindows.count) live windows survive capture's filter "
-        + "(of \(live.existence.normalLayer.count) normal-layer, \(live.existence.ids.count) total)")
-    return ColdStartMatch.assign(captured: snapshot.windows, live: liveWindows)
+        + "(of \(live.existence.normalLayer.count) normal-layer, \(live.existence.ids.count) total); "
+        + "resolved \(assignment.count)/\(snapshot.windows.count) by tier: exact \(assignment.exact), "
+        + "position \(assignment.position), size \(assignment.size)")
+    return assignment.map
   }
 
   // MARK: - I/O sweep
@@ -282,7 +287,7 @@ public enum Restore {
     // skipping them one at a time would report 38 individual mismatches and never state the one real cause.
     // The host raises a standing condition off this; a silent refusal would be the very defect #keeps-20 fixed.
     public var staleSession: Bool = false
-    // #keeps-5.4: this run resolved its windows by app+position rather than by id, because the snapshot
+    // #keeps-5.4: this run resolved its windows by app+geometry rather than by id, because the snapshot
     // predates the boot. Surfaced so the status line can SAY so — a best-effort restore must not read
     // identically to one that matched exactly, or the user learns the wrong thing about what keeps knows.
     public var coldStart: Bool = false
@@ -318,7 +323,7 @@ public enum Restore {
         readFailed: true)
     }
     // #keeps-5.4: a prior-session snapshot no longer means "refuse". It means the saved `cgWindowId`s are
-    // dead and must be resolved another way — by app + position (`ColdStartMatch`). `5.1`'s whole-run refusal
+    // dead and must be resolved another way — by app + geometry (`ColdStartMatch`). `5.1`'s whole-run refusal
     // survives ONLY as the fallback when nothing can be resolved at all, which is the one case where
     // proceeding would place nothing anyway and a bare "0 restored" would be the ambiguity we removed.
     //
@@ -332,7 +337,7 @@ public enum Restore {
       DebugTrace.log(
         "=== restore fp=\(snapshot.configFingerprint) COLD START — snapshot predates this boot "
           + "(capturedAt=\(snapshot.capturedAt)); resolved \(remap?.count ?? 0)/\(snapshot.windows.count) "
-          + "windows by app+position")
+          + "windows by app+geometry")
       guard !(remap ?? [:]).isEmpty else {  // nothing resolvable ⇒ the honest stop, not a bare zero
         return Result(
           planned: 0, applied: 0, failures: 0, skips: [:], outcomes: [], dryRun: !apply,
@@ -640,7 +645,24 @@ extension WindowFrame {
   /// True when two frames agree within ±tolerance px on every edge — the idempotence test (#keeps-3 Q6).
   /// Both sides must come from the SAME coordinate source (CGWindowList bounds) or the compare is meaningless.
   func matches(_ other: WindowFrame, tolerance: Int) -> Bool {
-    abs(x - other.x) <= tolerance && abs(y - other.y) <= tolerance && abs(w - other.w) <= tolerance
-      && abs(h - other.h) <= tolerance
+    samePosition(other, tolerance: tolerance) && sameSize(other, tolerance: tolerance)
+  }
+
+  /// Same origin within ±tolerance, whatever the size — `ColdStartMatch`'s tier 2 (#keeps-31): a strip whose
+  /// width tracks its content, or a window resized in place. Not on its own a proof of "home".
+  func samePosition(_ other: WindowFrame, tolerance: Int) -> Bool {
+    abs(x - other.x) <= tolerance && abs(y - other.y) <= tolerance
+  }
+
+  /// Same size within ±tolerance, wherever it sits — tier 3: an app that relaunched a window elsewhere.
+  func sameSize(_ other: WindowFrame, tolerance: Int) -> Bool {
+    abs(w - other.w) <= tolerance && abs(h - other.h) <= tolerance
+  }
+
+  /// Squared distance between centres, in px² — the within-tier tiebreak. Squared so it stays an exact Int.
+  func centreDistanceSquared(to other: WindowFrame) -> Int {
+    let dx = (2 * x + w) - (2 * other.x + other.w)  // 2× the centre delta; the factor cancels in comparison
+    let dy = (2 * y + h) - (2 * other.y + other.h)
+    return dx * dx + dy * dy
   }
 }

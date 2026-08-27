@@ -108,7 +108,7 @@ import UserNotifications
      // restore, and the user learns the wrong thing about what keeps actually knows about their windows.
      print(
        "COLD START — this snapshot predates the last restart, so its window ids are dead. "
-         + "Resolved \(r.coldStartMatched)/\(snap.windows.count) windows by app + position instead.")
+         + "Resolved \(r.coldStartMatched)/\(snap.windows.count) windows by app + geometry instead.")
    }
    let skipStr = r.skips.sorted { $0.value > $1.value }.map { "\($0.key.rawValue)=\($0.value)" }
      .joined(separator: ", ")
@@ -682,7 +682,7 @@ import UserNotifications
 
    private func noteRestore(_ r: Restore.Result, _ kind: String) {
      let tail = r.carryDeferred > 0 ? " · \(r.carryDeferred) on other Spaces" : ""
-     // #keeps-5.4: a cold-start run resolved windows by app + position, not by id — best-effort by
+     // #keeps-5.4: a cold-start run resolved windows by app + geometry, not by id — best-effort by
      // construction, because with no window titles seven Bear windows are indistinguishable. It must not read
      // identically to an exact restore, or the user learns the wrong thing about what keeps actually knows.
      let how = r.coldStart ? " · matched by app & position after the restart" : ""
