@@ -179,6 +179,17 @@ public enum Restore {
     }
     let displays: [Display]
 
+    /// #keeps-15: the live displays as `Snapshot.resolved(against:)` takes them — projected here so `Snapshot`
+    /// never imports the restore engine.
+    var liveDisplays: [LiveDisplay] {
+      displays.map {
+        LiveDisplay(
+          uuid: $0.uuid,
+          bounds: DisplayBounds(
+            x: Int($0.bounds.minX), y: Int($0.bounds.minY), w: Int($0.bounds.width), h: Int($0.bounds.height)))
+      }
+    }
+
     /// The display whose bounds contain the frame's center; nil ⇒ no live display owns it (an off-screen target).
     func displayContaining(_ f: WindowFrame) -> Display? {
       let c = CGPoint(x: Double(f.x) + Double(f.w) / 2, y: Double(f.y) + Double(f.h) / 2)
@@ -412,6 +423,15 @@ public enum Restore {
     //
     // #keeps-30: the same resolver runs in THIS boot session too — a dead id whose app relaunched is
     // re-matched the same way, instead of being trusted as `gone` while the app sits there with a new window.
+    //
+    // #keeps-15: BEFORE any id or frame is compared, translate every saved frame into today's coordinates —
+    // a display that came back at a different global origin (a drag in Arrange Displays, 2026-08-29: +333px)
+    // shifts its windows by that delta; everything downstream keeps reading absolute frames and never learns
+    // display-relative coordinates exist. The resolved snapshot is for THIS run only — never save it.
+    let (snapshot, resolveNotes) = snapshot.resolved(against: live.topology.liveDisplays)
+    if DebugTrace.enabled {
+      DebugTrace.log(DebugTrace.resolveLine(fp: snapshot.configFingerprint, notes: resolveNotes))
+    }
     let trustIds = SessionFreshness.isCurrent(snapshot)
     let coldStart = !trustIds
     let resolution = resolveIds(snapshot, live: live, trustIds: trustIds)

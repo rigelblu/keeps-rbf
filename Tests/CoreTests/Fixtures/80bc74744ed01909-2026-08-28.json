@@ -1,0 +1,423 @@
+{
+  "capturedAt" : "2026-08-28T13:16:38Z",
+  "configFingerprint" : "80bc74744ed01909",
+  "displays" : [
+    {
+      "activeDesktopOrdinal" : 5,
+      "desktopCount" : 14,
+      "uuid" : "37D8832A-2D66-02CA-B9F7-8F30A301B230"
+    },
+    {
+      "activeDesktopOrdinal" : 2,
+      "desktopCount" : 4,
+      "uuid" : "943BF734-59F5-4793-A42C-45E6900CE778"
+    },
+    {
+      "activeDesktopOrdinal" : 1,
+      "desktopCount" : 3,
+      "uuid" : "47D9AC15-E011-4DD8-B953-F43E9D2D66AE"
+    }
+  ],
+  "schema" : "keeps-capture\/v1",
+  "windows" : [
+    {
+      "bundleId" : "com.apple.Safari",
+      "cgWindowId" : 30796,
+      "desktopOrdinal" : 1,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 1130,
+        "w" : 1200,
+        "x" : 0,
+        "y" : 39
+      },
+      "onScreen" : false,
+      "pid" : 15051,
+      "spaceIds" : [
+        3
+      ],
+      "spaceUUID" : "A14B68AD-6D73-4A2B-8FFB-1048C8321116",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "com.apple.mail",
+      "cgWindowId" : 30739,
+      "desktopOrdinal" : 1,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 1130,
+        "w" : 1200,
+        "x" : 0,
+        "y" : 39
+      },
+      "onScreen" : false,
+      "pid" : 50123,
+      "spaceIds" : [
+        3
+      ],
+      "spaceUUID" : "A14B68AD-6D73-4A2B-8FFB-1048C8321116",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "com.cmuxterm.app.rbf",
+      "cgWindowId" : 30690,
+      "desktopOrdinal" : 1,
+      "displayUUID" : "47D9AC15-E011-4DD8-B953-F43E9D2D66AE",
+      "frame" : {
+        "h" : 2130,
+        "w" : 3840,
+        "x" : 1800,
+        "y" : -1787
+      },
+      "onScreen" : true,
+      "pid" : 73670,
+      "spaceIds" : [
+        725
+      ],
+      "spaceUUID" : "76B0CB84-4140-4E1D-8865-1BBD49B9B86C",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "fm.overcast.overcast",
+      "cgWindowId" : 29045,
+      "desktopOrdinal" : 1,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 678,
+        "w" : 1024,
+        "x" : 80,
+        "y" : 257
+      },
+      "onScreen" : false,
+      "pid" : 32644,
+      "spaceIds" : [
+        3
+      ],
+      "spaceUUID" : "A14B68AD-6D73-4A2B-8FFB-1048C8321116",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "com.apple.Safari",
+      "cgWindowId" : 28125,
+      "desktopOrdinal" : 6,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 111,
+        "w" : 202,
+        "x" : 425,
+        "y" : 440
+      },
+      "onScreen" : false,
+      "pid" : 15051,
+      "spaceIds" : [
+        9
+      ],
+      "spaceUUID" : "73715889-F25F-4660-B28D-9304C3B05341",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "dev.zed.Zed-RBF",
+      "cgWindowId" : 26459,
+      "desktopOrdinal" : 2,
+      "displayUUID" : "943BF734-59F5-4793-A42C-45E6900CE778",
+      "frame" : {
+        "h" : 1425,
+        "w" : 5120,
+        "x" : -3320,
+        "y" : -2850
+      },
+      "onScreen" : true,
+      "pid" : 79519,
+      "spaceIds" : [
+        18
+      ],
+      "spaceUUID" : "FFA17A89-FE2B-431F-AD1B-840AA4795EA3",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "com.google.Chrome.beta",
+      "cgWindowId" : 25741,
+      "desktopOrdinal" : 1,
+      "displayUUID" : "943BF734-59F5-4793-A42C-45E6900CE778",
+      "frame" : {
+        "h" : 1425,
+        "w" : 2560,
+        "x" : -760,
+        "y" : -2850
+      },
+      "onScreen" : false,
+      "pid" : 51916,
+      "spaceIds" : [
+        727
+      ],
+      "spaceUUID" : "DABFAC5C-8762-4014-B841-1CA9DB53ADD8",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "com.figma.Desktop",
+      "cgWindowId" : 25493,
+      "desktopOrdinal" : 3,
+      "displayUUID" : "943BF734-59F5-4793-A42C-45E6900CE778",
+      "frame" : {
+        "h" : 2850,
+        "w" : 3413,
+        "x" : -1613,
+        "y" : -2850
+      },
+      "onScreen" : false,
+      "pid" : 93755,
+      "spaceIds" : [
+        19
+      ],
+      "spaceUUID" : "1B3436F1-167E-4F3B-8023-B2E88ED01AC4",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "com.anthropic.claudefordesktop",
+      "cgWindowId" : 25469,
+      "desktopOrdinal" : 5,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 1130,
+        "w" : 1200,
+        "x" : 0,
+        "y" : 39
+      },
+      "onScreen" : true,
+      "pid" : 93053,
+      "spaceIds" : [
+        7
+      ],
+      "spaceUUID" : "7A7BE0EB-7BA9-4545-BAD2-34E88A8680D9",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "net.shinyfrog.bear",
+      "cgWindowId" : 25378,
+      "desktopOrdinal" : 2,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 713,
+        "w" : 658,
+        "x" : 551,
+        "y" : 39
+      },
+      "onScreen" : false,
+      "pid" : 78755,
+      "spaceIds" : [
+        4
+      ],
+      "spaceUUID" : "DE72040E-58C0-4D0F-88E4-8DAE888EC4F3",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "net.shinyfrog.bear",
+      "cgWindowId" : 25377,
+      "desktopOrdinal" : 2,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 416,
+        "w" : 598,
+        "x" : 1202,
+        "y" : 753
+      },
+      "onScreen" : false,
+      "pid" : 78755,
+      "spaceIds" : [
+        4
+      ],
+      "spaceUUID" : "DE72040E-58C0-4D0F-88E4-8DAE888EC4F3",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "net.shinyfrog.bear",
+      "cgWindowId" : 25376,
+      "desktopOrdinal" : 2,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 416,
+        "w" : 588,
+        "x" : 1212,
+        "y" : 753
+      },
+      "onScreen" : false,
+      "pid" : 78755,
+      "spaceIds" : [
+        4
+      ],
+      "spaceUUID" : "DE72040E-58C0-4D0F-88E4-8DAE888EC4F3",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "net.shinyfrog.bear",
+      "cgWindowId" : 25375,
+      "desktopOrdinal" : 2,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 712,
+        "w" : 596,
+        "x" : 1202,
+        "y" : 39
+      },
+      "onScreen" : false,
+      "pid" : 78755,
+      "spaceIds" : [
+        4
+      ],
+      "spaceUUID" : "DE72040E-58C0-4D0F-88E4-8DAE888EC4F3",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "net.shinyfrog.bear",
+      "cgWindowId" : 25374,
+      "desktopOrdinal" : 2,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 1130,
+        "w" : 550,
+        "x" : 0,
+        "y" : 39
+      },
+      "onScreen" : false,
+      "pid" : 78755,
+      "spaceIds" : [
+        4
+      ],
+      "spaceUUID" : "DE72040E-58C0-4D0F-88E4-8DAE888EC4F3",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "com.openai.codex",
+      "cgWindowId" : 26152,
+      "desktopOrdinal" : 6,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 1130,
+        "w" : 1200,
+        "x" : 0,
+        "y" : 39
+      },
+      "onScreen" : false,
+      "pid" : 45257,
+      "spaceIds" : [
+        9
+      ],
+      "spaceUUID" : "73715889-F25F-4660-B28D-9304C3B05341",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "net.shinyfrog.bear",
+      "cgWindowId" : 25355,
+      "desktopOrdinal" : 3,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 1130,
+        "w" : 1422,
+        "x" : 0,
+        "y" : 39
+      },
+      "onScreen" : false,
+      "pid" : 78755,
+      "spaceIds" : [
+        5
+      ],
+      "spaceUUID" : "2C21CD12-4B1C-44BB-8A96-44C4CAD9EB40",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "com.google.Chrome.beta",
+      "cgWindowId" : 25743,
+      "desktopOrdinal" : 2,
+      "displayUUID" : "943BF734-59F5-4793-A42C-45E6900CE778",
+      "frame" : {
+        "h" : 89,
+        "w" : 1862,
+        "x" : -421,
+        "y" : -2865
+      },
+      "onScreen" : false,
+      "pid" : 51916,
+      "spaceIds" : [
+        18
+      ],
+      "spaceUUID" : "FFA17A89-FE2B-431F-AD1B-840AA4795EA3",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "net.shinyfrog.bear",
+      "cgWindowId" : 25379,
+      "desktopOrdinal" : 2,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 416,
+        "w" : 659,
+        "x" : 550,
+        "y" : 753
+      },
+      "onScreen" : false,
+      "pid" : 78755,
+      "spaceIds" : [
+        4
+      ],
+      "spaceUUID" : "DE72040E-58C0-4D0F-88E4-8DAE888EC4F3",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "com.google.GeminiMacOS",
+      "cgWindowId" : 25350,
+      "desktopOrdinal" : 1,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 678,
+        "w" : 1024,
+        "x" : 72,
+        "y" : 254
+      },
+      "onScreen" : false,
+      "pid" : 78365,
+      "spaceIds" : [
+        3
+      ],
+      "spaceUUID" : "A14B68AD-6D73-4A2B-8FFB-1048C8321116",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "com.flexibits.fantastical2.mac",
+      "cgWindowId" : 23940,
+      "desktopOrdinal" : 1,
+      "displayUUID" : "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+      "frame" : {
+        "h" : 1130,
+        "w" : 1200,
+        "x" : 0,
+        "y" : 39
+      },
+      "onScreen" : false,
+      "pid" : 90180,
+      "spaceIds" : [
+        3
+      ],
+      "spaceUUID" : "A14B68AD-6D73-4A2B-8FFB-1048C8321116",
+      "sticky" : false
+    },
+    {
+      "bundleId" : "dev.zed.Zed-RBF",
+      "cgWindowId" : 29568,
+      "desktopOrdinal" : 2,
+      "displayUUID" : "943BF734-59F5-4793-A42C-45E6900CE778",
+      "frame" : {
+        "h" : 1425,
+        "w" : 5120,
+        "x" : -3320,
+        "y" : -1425
+      },
+      "onScreen" : true,
+      "pid" : 79519,
+      "spaceIds" : [
+        18
+      ],
+      "spaceUUID" : "FFA17A89-FE2B-431F-AD1B-840AA4795EA3",
+      "sticky" : false
+    }
+  ]
+}
