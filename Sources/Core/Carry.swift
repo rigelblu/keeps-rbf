@@ -312,6 +312,12 @@ public enum Carry {
         // #keeps-5.4: same story as restore — a prior-session snapshot means the ids need resolving by
         // app+geometry, not that the run is refused. Refusal survives only when nothing resolves at all.
         // #keeps-30: the same resolver runs same-session too, for dead ids whose app relaunched.
+        // #keeps-15: same resolve as `Restore.restore`, same place — the two classifiers must read the same
+        // frames (#keeps-22). Never save the resolved snapshot.
+        let (snapshot, resolveNotes) = snapshot.resolved(against: live.topology.liveDisplays)
+        if DebugTrace.enabled {
+            DebugTrace.log(DebugTrace.resolveLine(fp: snapshot.configFingerprint, notes: resolveNotes))
+        }
         let trustIds = SessionFreshness.isCurrent(snapshot)
         let resolution = Restore.resolveIds(snapshot, live: live, trustIds: trustIds)
         let remap = resolution.map

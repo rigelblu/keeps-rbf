@@ -7,12 +7,32 @@ import CryptoKit
 
 public enum ConfigIdentity {
     /// UUID strings of the currently-active displays, sorted (order-independent key).
+    /// Deliberately NOT folded onto `activeDisplayBounds()` (#keeps-15 review S2, reverted at the conduct check):
+    /// this list feeds `fingerprint()`, and keying a dictionary would dedupe two displays that report one UUID
+    /// where this `compactMap` keeps both — a mirrored set would fingerprint differently, and no test or live
+    /// run covers that. The snapshot key stays exactly what it was.
     public static func activeDisplayUUIDs() -> [String] {
         var count: UInt32 = 0
         CGGetActiveDisplayList(0, nil, &count)
         var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
         CGGetActiveDisplayList(count, &ids, &count)
         return ids.prefix(Int(count)).compactMap { uuid($0) }.sorted()
+    }
+
+    /// #keeps-15: uuid → `CGDisplayBounds` for every active display — the one walk that already owns display
+    /// identity, so capture joins its CGS display list to it by uuid instead of growing a third display walk.
+    public static func activeDisplayBounds() -> [String: DisplayBounds] {
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &count)
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetActiveDisplayList(count, &ids, &count)
+        var map: [String: DisplayBounds] = [:]
+        for id in ids.prefix(Int(count)) {
+            guard let u = uuid(id) else { continue }
+            let b = CGDisplayBounds(id)
+            map[u] = DisplayBounds(x: Int(b.minX), y: Int(b.minY), w: Int(b.width), h: Int(b.height))
+        }
+        return map
     }
 
     public static func uuid(_ id: CGDirectDisplayID) -> String? {
