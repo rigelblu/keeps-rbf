@@ -144,14 +144,18 @@ public enum Capture {
   }
 
   private static func displaySummaries(_ cid: CGSConnectionID) -> [DisplaySummary] {
-    cgsManagedDisplaySpaces(cid).map { d in
+    // #keeps-15: each display's global bounds ride on the snapshot so restore can resolve saved frames against
+    // where the display sits NOW. The CGS "Display Identifier" is the same string `ConfigIdentity.uuid` derives
+    // (the join `Restore.Topology.live` already relies on); a miss saves `nil` — never refuse a Save over it.
+    let bounds = ConfigIdentity.activeDisplayBounds()
+    return cgsManagedDisplaySpaces(cid).map { d in
       let spaces = (d["Spaces"] as? [[String: Any]]) ?? []
       let activeID = (d["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? Int ?? -1
       let activeOrdinal =
         (spaces.firstIndex { ($0["ManagedSpaceID"] as? Int) == activeID }).map { $0 + 1 } ?? -1
+      let uuid = d["Display Identifier"] as? String ?? "?"
       return DisplaySummary(
-        uuid: d["Display Identifier"] as? String ?? "?",
-        desktopCount: spaces.count, activeDesktopOrdinal: activeOrdinal)
+        uuid: uuid, desktopCount: spaces.count, activeDesktopOrdinal: activeOrdinal, bounds: bounds[uuid])
     }
   }
 

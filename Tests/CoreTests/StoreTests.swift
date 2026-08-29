@@ -39,6 +39,40 @@ import Testing
     #expect(loaded.windows == snap.windows)
   }
 
+  @Test func v1FileWithoutDisplayBoundsStillLoads() throws {
+    // #keeps-15: `bounds` is optional and the schema string is unchanged, so every file saved before it decodes
+    // with `bounds == nil` — and resolves as absolute, exactly as before. Refusing them (a schema bump) would
+    // make every stored config restore nothing until re-Saved, including the ones you're not docked into.
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "keeps-test-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let store = Store(directory: dir)
+    let fp = "00000000000000bb"
+    let v1 =
+      #"{"schema":"keeps-capture/v1","capturedAt":"2026-08-28T13:16:38Z","configFingerprint":"00000000000000bb","displays":[{"uuid":"DISP-A","desktopCount":3,"activeDesktopOrdinal":1}],"windows":[]}"#
+    try v1.data(using: .utf8)!.write(to: store.url(for: fp))
+    let loaded = try store.load(fingerprint: fp)
+    #expect(loaded.displays.count == 1)
+    #expect(loaded.displays[0].bounds == nil)
+    let (resolved, notes) = loaded.resolved(against: [
+      LiveDisplay(uuid: "DISP-A", bounds: DisplayBounds(x: 500, y: 0, w: 1920, h: 1080))
+    ])
+    #expect(notes == [.noSavedBounds])
+    #expect(resolved.windows == loaded.windows)
+  }
+
+  @Test func boundsSurviveTheRoundTrip() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "keeps-test-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let store = Store(directory: dir)
+    var snap = sampleSnapshot()
+    snap.displays[0].bounds = DisplayBounds(x: -1920, y: 0, w: 1920, h: 1080)
+    _ = try store.save(snap)
+    #expect(try store.load(fingerprint: snap.configFingerprint).displays == snap.displays)
+  }
+
   @Test func eachFingerprintGetsItsOwnFile() throws {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent(
       "keeps-test-\(UUID().uuidString)")
