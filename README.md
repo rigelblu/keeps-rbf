@@ -85,6 +85,13 @@ geometry (exact frame, then same position, then same size; same app only), so a 
 home without a re-Save. A window you closed while its app kept running stays closed; a relaunch at a new
 size *and* position isn't matched until the next Save.
 
+keeps remembers where a window sits *on its display*, not just where it sits on the desktop. If a display
+comes back at a different position in your arrangement — or you drag it in System Settings › Displays —
+its windows still land at the same spots on it, and the ones macOS already moved with the display are left
+alone. A layout saved before this version carries no display positions, so its first Save afterwards records
+them; until then that layout restores exactly as before. A display that comes back at a different
+*resolution* is not handled yet — its windows restore as before.
+
 ## Status / roadmap
 
 - ✅ **Research** — established what's possible SIP-on (the constraint above)

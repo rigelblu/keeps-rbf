@@ -110,6 +110,25 @@ public enum DebugTrace {
       + "    desired \(fr(desired))  |  before \(fr(before))  |  after \(fr(after))"
   }
 
+  /// #keeps-15: what the resolve did per display, in the snapshot's `displays` order. Pure, so it's asserted
+  /// without a restore. `=== resolve fp=… — 37D8832A unchanged, 943BF734 shifted (+333,0), 47D9AC15 shifted
+  /// (+333,-167)`; a whole pre-#keeps-15 snapshot reads `absolute (no saved display bounds)`.
+  public static func resolveLine(fp: String, notes: [ResolveNote]) -> String {
+    func signed(_ n: Int) -> String { n > 0 ? "+\(n)" : "\(n)" }
+    func size(_ b: DisplayBounds) -> String { "\(b.w)×\(b.h)" }
+    let body = notes.map { note -> String in
+      switch note {
+      case .noSavedBounds: return "absolute (no saved display bounds)"
+      case .unchanged(let u): return "\(u.prefix(8)) unchanged"
+      case .shifted(let u, let dx, let dy): return "\(u.prefix(8)) shifted (\(signed(dx)),\(signed(dy)))"
+      case .absolute(let u, .noSavedBounds): return "\(u.prefix(8)) absolute (no saved display bounds)"
+      case .absolute(let u, .resized(let s, let l)): return "\(u.prefix(8)) absolute (resized \(size(s)) → \(size(l)))"
+      case .absolute(let u, .absent): return "\(u.prefix(8)) absolute (absent live)"
+      }
+    }.joined(separator: ", ")
+    return "=== resolve fp=\(fp) — \(body)"
+  }
+
   /// The live display arrangement, one short line — the reference for spotting a coordinate shift.
   public static func displaysHeader(_ displays: [(uuid: String, bounds: CGRect)]) -> String {
     displays.map {

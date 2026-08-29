@@ -14,7 +14,10 @@ let package = Package(
     // The menu-bar host: NSStatusItem app wiring Watcher → Capture → Store.
     .executableTarget(name: "keeps", dependencies: ["Core"]),
     // Pure-logic unit tests (capture filter decisions, fingerprint, store round-trip).
-    .testTarget(name: "CoreTests", dependencies: ["Core"]),
+    .testTarget(
+      name: "CoreTests", dependencies: ["Core"],
+      // #keeps-15: real store files the pure tests resolve against (a checked-in copy — the live store moves).
+      resources: [.copy("Fixtures")]),
   ],
   // 1st-pass (make-work): Swift 5 mode skips strict-concurrency checks on the dlopen'd CGS global
   // pointers (as the spike did). 2nd-pass hardening moves this to Swift 6 concurrency.

@@ -15,6 +15,32 @@ import Testing
     #expect(DebugTrace.displayOf(WindowFrame(x: 100, y: 100, w: 800, h: 600), in: [lg, mb]) == "MB-UUID")
   }
 
+  // #keeps-15: the resolve line is the one place a reader learns whether this run placed by saved-relative spot
+  // or fell back to absolute, per display — so its wording is pinned, in the snapshot's display order.
+  @Test func resolveLineNamesEachDisplaysOutcomeInOrder() {
+    let notes: [ResolveNote] = [
+      .unchanged(uuid: "37D8832A-2D66-02CA-B9F7-8F30A301B230"),
+      .shifted(uuid: "943BF734-59F5-4793-A42C-45E6900CE778", dx: 333, dy: 0),
+      .shifted(uuid: "47D9AC15-E011-4DD8-B953-F43E9D2D66AE", dx: 333, dy: -167),
+    ]
+    #expect(
+      DebugTrace.resolveLine(fp: "80bc74744ed01909", notes: notes)
+        == "=== resolve fp=80bc74744ed01909 — 37D8832A unchanged, 943BF734 shifted (+333,0), 47D9AC15 shifted (+333,-167)")
+    #expect(
+      DebugTrace.resolveLine(fp: "80bc74744ed01909", notes: [.noSavedBounds])
+        == "=== resolve fp=80bc74744ed01909 — absolute (no saved display bounds)")
+    let fallbacks: [ResolveNote] = [
+      .absolute(uuid: "943BF734-59F5", reason: .noSavedBounds),
+      .absolute(
+        uuid: "943BF734-59F5",
+        reason: .resized(saved: DisplayBounds(x: 0, y: 0, w: 3360, h: 1890), live: DisplayBounds(x: 0, y: 0, w: 5120, h: 2880))),
+      .absolute(uuid: "943BF734-59F5", reason: .absent),
+    ]
+    #expect(
+      DebugTrace.resolveLine(fp: "x", notes: fallbacks)
+        == "=== resolve fp=x — 943BF734 absolute (no saved display bounds), 943BF734 absolute (resized 3360×1890 → 5120×2880), 943BF734 absolute (absent live)")
+  }
+
   @Test func reportsOffScreenWhenNoDisplayContainsTheCenter() {
     // A frame whose center lands outside every display — the symptom of a coordinate shift on reconnect.
     #expect(DebugTrace.displayOf(WindowFrame(x: 9000, y: 9000, w: 100, h: 100), in: [lg, mb]) == "off-screen")
