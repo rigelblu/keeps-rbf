@@ -30,7 +30,10 @@ if ! security find-identity -v -p codesigning | grep -q -- "$IDENTITY"; then
   exit 3
 fi
 
-taskpolicy -b nice -n 1 swift build -c "$CONFIG" --package-path "$REPO" --scratch-path "$SCRATCH"
+# Default priority on purpose: `taskpolicy -b` made this build 7× slower (measured 2026-08-28, M4 Pro) and bought
+# no responsiveness; `nice -n 1` is a no-op. If multi-agent load ever hurts, `taskpolicy -c utility` is the one
+# clamp that keeps full speed — never `-b` or `-c maintenance`.
+swift build -c "$CONFIG" --package-path "$REPO" --scratch-path "$SCRATCH"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
