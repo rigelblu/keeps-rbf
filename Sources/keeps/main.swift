@@ -1040,7 +1040,7 @@ import UserNotifications
        let content = UNMutableNotificationContent()
        content.title = "keeps"
        content.body = CarrySignifier.verdictBody(
-         carried: r.carried, planned: r.plannedCarries, aborted: r.aborted)
+         carried: r.carried, planned: r.verdictPlanned, aborted: r.aborted)  // #keeps-36.1: quiet misses left out
        center.add(
          UNNotificationRequest(identifier: Self.verdictNotificationID, content: content, trigger: nil)
        ) { addErr in
