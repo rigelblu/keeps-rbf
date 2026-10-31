@@ -731,14 +731,14 @@ public enum Restore {
     var s = CGSize.zero
     AXValueGetValue(posV as! AXValue, .cgPoint, &p)
     AXValueGetValue(sizeV as! AXValue, .cgSize, &s)
-    return WindowFrame(x: Int(p.x), y: Int(p.y), w: Int(s.width), h: Int(s.height))
+    return WindowFrame(CGRect(origin: p, size: s))
   }
 
-  private static func frame(from info: [String: Any]) -> WindowFrame? {
+  static func frame(from info: [String: Any]) -> WindowFrame? {
     guard let dict = info[kCGWindowBounds as String],
       let r = CGRect(dictionaryRepresentation: dict as! CFDictionary)
     else { return nil }
-    return WindowFrame(x: Int(r.minX), y: Int(r.minY), w: Int(r.width), h: Int(r.height))
+    return WindowFrame(r)
   }
 
   private static func axFlag(_ el: AXUIElement, _ attr: String) -> Bool {

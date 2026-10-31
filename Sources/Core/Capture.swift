@@ -17,7 +17,7 @@ public enum Capture {
   public enum DropReason: String, Codable, CaseIterable {
     case notRegularApp  // owner isn't a regular (Dock-shown) app
     case notNormalLayer  // layer != 0 — menus, panels, status items, shadows
-    case noBounds  // no CGWindowBounds — can't place it
+    case noBounds  // no CGWindowBounds, or bounds that aren't finite numbers (#keeps-38.4) — can't place it
     case noSpace  // on zero spaces — WindowServer junk (helper strips, placeholders) or minimized
     case degenerateFrame  // zero/negative size — not a real, restorable window
     case noWindowID  // kCGWindowNumber absent (wid == 0) — unidentifiable, can't be restored
@@ -120,11 +120,11 @@ public enum Capture {
 
   // MARK: - I/O helpers
 
-  private static func frame(from info: [String: Any]) -> WindowFrame? {
+  static func frame(from info: [String: Any]) -> WindowFrame? {
     guard let dict = info[kCGWindowBounds as String],
       let r = CGRect(dictionaryRepresentation: dict as! CFDictionary)
     else { return nil }
-    return WindowFrame(x: Int(r.minX), y: Int(r.minY), w: Int(r.width), h: Int(r.height))
+    return WindowFrame(r)
   }
 
   // ManagedSpaceID -> (display uuid, 1-based ordinal). The ordinal is the ⌥⌘N target #keeps-3 will use.

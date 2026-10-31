@@ -1,10 +1,27 @@
 // The captured layout — the source of truth #keeps-3 restore reads back. Codable, schema-versioned.
+import CoreGraphics
 import Foundation
 
 public let captureSchema = "keeps-capture/v1"
 
 public struct WindowFrame: Codable, Equatable {
   public var x: Int, y: Int, w: Int, h: Int
+}
+
+/// #keeps-38.4: `Int(_:)` traps on a value that isn't finite or doesn't fit, and macOS 27 lists a WindowManager
+/// window at `(inf, inf, 0, 0)` — every Restore read it and crashed keeps. Such bounds are no frame at all.
+/// Every real frame still truncates toward zero, exactly as before.
+private func finiteInts(_ r: CGRect) -> (x: Int, y: Int, w: Int, h: Int)? {
+  let values = [r.minX, r.minY, r.width, r.height]
+  guard values.allSatisfy({ $0.isFinite && abs($0) < 1e9 }) else { return nil }
+  return (Int(r.minX), Int(r.minY), Int(r.width), Int(r.height))
+}
+
+extension WindowFrame {
+  public init?(_ r: CGRect) {
+    guard let v = finiteInts(r) else { return nil }
+    self.init(x: v.x, y: v.y, w: v.w, h: v.h)
+  }
 }
 
 public struct CapturedWindow: Codable, Equatable {
@@ -29,6 +46,11 @@ public struct DisplayBounds: Codable, Equatable {
   public var x: Int, y: Int, w: Int, h: Int
   public init(x: Int, y: Int, w: Int, h: Int) {
     self.x = x; self.y = y; self.w = w; self.h = h
+  }
+
+  public init?(_ r: CGRect) {
+    guard let v = finiteInts(r) else { return nil }
+    self.init(x: v.x, y: v.y, w: v.w, h: v.h)
   }
 }
 

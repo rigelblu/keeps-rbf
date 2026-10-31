@@ -642,7 +642,7 @@ public enum Carry {
             log.info("carry wid=\(cap.cgWindowId) FAILED grab-leg: not on screen after nav to \(fromGlobal) \(Outcome.raiseEvidence(raised), privacy: .public); disp \(from?.displayIndex ?? -1) now at perIdx \(nowIdx) (wanted \(from?.perDisplayIndex ?? -1))")
             return .notOnScreen(raised: raised)
         }
-        log.info("carry wid=\(cap.cgWindowId) on screen at (\(Int(bounds.minX)),\(Int(bounds.minY)) \(Int(bounds.width))×\(Int(bounds.height)))")
+        log.info("carry wid=\(cap.cgWindowId) on screen at \(WindowFrame(bounds).map { "(\($0.x),\($0.y) \($0.w)×\($0.h))" } ?? "\(bounds)")")
         try? await Task.sleep(for: .milliseconds(700))   // settle the freshly-navigated desktop before grabbing
 
         // #keeps-17.2: a desktop switch moves a window on ONE display; a cross-display target takes the
@@ -712,9 +712,7 @@ public enum Carry {
         let placed = placeFrame(cap)
         if DebugTrace.enabled && DebugTrace.traces(bundleId: cap.bundleId, title: cap.title) {
             let displays = DebugTrace.activeDisplays()
-            let after = onScreenBounds(cap.cgWindowId).map {
-                WindowFrame(x: Int($0.minX), y: Int($0.minY), w: Int($0.width), h: Int($0.height))
-            }
+            let after = onScreenBounds(cap.cgWindowId).flatMap(WindowFrame.init)
             DebugTrace.log(DebugTrace.windowLine(
                 bundleId: cap.bundleId, title: cap.title, wid: cap.cgWindowId,
                 decision: "carry→place \(placed ? "ok" : "FAILED(axSet)") (desktop \(toGlobal), landed=\(landedOn ?? -1))",
@@ -767,15 +765,12 @@ public enum Carry {
         }
         if DebugTrace.enabled && DebugTrace.traces(bundleId: cap.bundleId, title: cap.title) {
             let displays = DebugTrace.activeDisplays()
-            let after = onScreenBounds(cap.cgWindowId).map {
-                WindowFrame(x: Int($0.minX), y: Int($0.minY), w: Int($0.width), h: Int($0.height))
-            }
+            let after = onScreenBounds(cap.cgWindowId).flatMap(WindowFrame.init)
             DebugTrace.log(DebugTrace.windowLine(
                 bundleId: cap.bundleId, title: cap.title, wid: cap.cgWindowId,
                 decision: "carry→crossDisplay \(carried ? "ok" : "FAILED(membership\(restitutionNote))") (desktop \(toGlobal), landed=\(landedOn ?? -1))",
                 desired: cap.frame,
-                before: WindowFrame(x: Int(preBounds.minX), y: Int(preBounds.minY),
-                                    w: Int(preBounds.width), h: Int(preBounds.height)),
+                before: WindowFrame(preBounds),
                 after: after, displays: displays))
         }
         guard carried else {
@@ -824,9 +819,8 @@ public enum Carry {
     }
 
     private static func restituteFrame(_ cap: CapturedWindow, to bounds: CGRect) -> Bool {
-        guard let el = axElement(for: cap) else { return false }
-        return Restore.setFrame(el, WindowFrame(x: Int(bounds.minX), y: Int(bounds.minY),
-                                                w: Int(bounds.width), h: Int(bounds.height)))
+        guard let el = axElement(for: cap), let frame = WindowFrame(bounds) else { return false }
+        return Restore.setFrame(el, frame)
     }
 
     /// Carry a HELD window across desktops on its current display: one global ⌥⌘N jump if the target is directly
@@ -1221,9 +1215,7 @@ public enum Carry {
             _ cap: CapturedWindow, tolerance: Int = Restore.frameTolerance, timeout: Double = 1.2
         ) async -> (held: FrameHeld?, lastSeen: WindowFrame?) {
             func read() -> WindowFrame? {
-                Carry.onScreenBounds(cap.cgWindowId).map {
-                    WindowFrame(x: Int($0.minX), y: Int($0.minY), w: Int($0.width), h: Int($0.height))
-                }
+                Carry.onScreenBounds(cap.cgWindowId).flatMap(WindowFrame.init)
             }
             var seen: WindowFrame?
             var firstMatchAt: Double?
