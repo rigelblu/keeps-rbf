@@ -122,6 +122,65 @@ public enum Carry {
         public init(candidates: [GripCandidate]) { self.candidates = candidates }
     }
 
+    /// #keeps-38 — one press, one record. `tryGrip` returns it, and it renders both the os_log line and the
+    /// `[grab]` file line, so the trace can never say something different from what the loop decided.
+    public struct GripTry: Equatable, Sendable {
+        public enum Verdict: Equatable, Sendable {
+            case followed(at: CGFloat)
+            case notFollowed
+            case vanished
+            case stoppedByHand
+            case stoppedBeforePress   // the hand moved before the press: no mouse-down was posted
+        }
+        public let bundleId: String
+        public let cgWindowId: UInt32
+        public let title: String?
+        public let source: GripCandidateSource
+        public let point: CGPoint
+        public let windowOrigin: CGPoint
+        public let index: Int          // 0-based; rendered 1-based
+        public let of: Int
+        public let limit: CGFloat
+        public let dragged: CGFloat    // how far right of the press the last drag event went
+        public let verdict: Verdict
+        public let moved: CGVector?    // window origin minus its frame before this press; nil when it vanished
+        public let ms: Int?            // from the mouse-down to the verdict; nil when no mouse-down was posted
+
+        public init(bundleId: String, cgWindowId: UInt32, title: String?, source: GripCandidateSource,
+                    point: CGPoint, windowOrigin: CGPoint, index: Int, of: Int, limit: CGFloat,
+                    dragged: CGFloat, verdict: Verdict, moved: CGVector?, ms: Int?) {
+            self.bundleId = bundleId; self.cgWindowId = cgWindowId; self.title = title; self.source = source
+            self.point = point; self.windowOrigin = windowOrigin; self.index = index; self.of = of
+            self.limit = limit; self.dragged = dragged; self.verdict = verdict; self.moved = moved; self.ms = ms
+        }
+
+        /// What happened, after the second dash.
+        var outcome: String {
+            let movedText = moved.map { "(\(Int($0.dx)),\(Int($0.dy)))" } ?? "?"
+            let tail = ", moved \(movedText), \(ms ?? 0)ms"
+            switch verdict {
+            case .followed(let at): return "followed at \(Int(at))px" + tail
+            case .notFollowed: return "not followed by \(Int(limit))px" + tail
+            case .vanished: return "window gone at \(Int(dragged))px" + tail
+            case .stoppedByHand: return "stopped by hand at \(Int(dragged))px" + tail
+            case .stoppedBeforePress: return "stopped by hand before the press — no mouse-down"
+            }
+        }
+
+        /// Everything after the window's name: which try, where, and what happened.
+        var press: String {
+            "try \(index + 1)/\(of) \(source.rawValue) at (\(Int(point.x)),\(Int(point.y))), "
+                + "window+(\(Int(point.x - windowOrigin.x)),\(Int(point.y - windowOrigin.y))) — \(outcome)"
+        }
+
+        /// The `[grab]` line (#keeps-38.2) — greppable, so its shape is pinned by `GripProofTests`. Written only to
+        /// the opt-in file trace, so it may carry the window title like every other window line there.
+        public var traceLine: String { "[grab] \(bundleId) wid=\(cgWindowId) \"\(title ?? "")\" — \(press)" }
+
+        /// The same press for os_log, which runs with the trace off: no window title, like every other os_log line.
+        public var osLogLine: String { "grab \(bundleId) wid=\(cgWindowId) — \(press)" }
+    }
+
     /// Pure #keeps-12 grip-profile generation. AX button frames are global, so generated points are global too.
     /// Candidate order is deliberate: close-button-top first, other derived traffic-light geometry next,
     /// prototype fallbacks last.
@@ -169,22 +228,60 @@ public enum Carry {
         return GripProfile(candidates: unique)
     }
 
-    /// #keeps-26 — the proof drag. After the press, the cursor is dragged this many points to the right, and
-    /// the window must follow by at least half of it before any Space switch is attempted. Right-only so a
-    /// failed proof's mouse-up lands in the titlebar beside the close button, never in its row.
+    /// #keeps-26's fixed proof drag, kept as the limit for a fallback point (#keeps-38). A fallback point can
+    /// land on a Chrome tab, and a longer drag there would reorder tabs. On macOS 27 a custom titlebar needs
+    /// more than 8px to start moving, so a fallback-first window most likely doesn't carry — the `[grab]` line
+    /// records whether one ever does.
     public static let gripDrag: CGFloat = 8
 
-    /// The points the drag events are posted at — `steps` even strides ending exactly `drag` to the right.
-    public static func dragPath(from p: CGPoint, drag: CGFloat = gripDrag, steps: Int = 3) -> [CGPoint] {
-        guard steps > 0 else { return [] }
-        return (1...steps).map { i in CGPoint(x: p.x + drag * CGFloat(i) / CGFloat(steps), y: p.y) }
+    /// #keeps-38 — the step drag. macOS 27 starts moving a custom-titlebar window only past 8px (2026-10-30:
+    /// no move at 8, a move at 10, then 1:1). macOS 26 moved it on the first drag event. So keeps steps until
+    /// the window follows instead of trusting a fixed distance, and gives up at `gripLimit`.
+    public static let gripStep: CGFloat = 2
+    public static let gripLimit: CGFloat = 40
+
+    /// The points the drag events are posted at: `step`, `2·step`, … up to `limit` px right of the press.
+    /// Right-only, same `y`. Each one is posted as a single `leftMouseDragged` — the stream the probe proved.
+    public static func stepPath(from p: CGPoint, step: CGFloat = gripStep, limit: CGFloat) -> [CGPoint] {
+        guard step > 0, limit >= step else { return [] }
+        return (1...Int(limit / step)).map { i in CGPoint(x: p.x + step * CGFloat(i), y: p.y) }
     }
 
-    /// Did the grab take? The window's left edge moved right by at least half the drag. Half, not the whole:
-    /// an app that anchors the move on the FIRST drag event travels ~2/3 of a 3-step drag, and the bar must
-    /// not call that grab failed. The bar derives from the drag — there is no second constant to drift.
+    /// How far a press at this point may drag: the full limit in the button row, today's 8px at a fallback
+    /// point (it can be a tab).
+    public static func dragLimit(for source: GripCandidateSource) -> CGFloat {
+        source == .knownGoodFallback ? gripDrag : gripLimit
+    }
+
+    /// Did the grab take? The window's left edge moved right by at least half the distance dragged so far —
+    /// an app that anchors the move on the first drag event lags one step — and never less than 3px, so a
+    /// 1px nudge is never read as a follow. The bar derives from the drag; there is no second constant.
     public static func gripTook(before: CGRect, after: CGRect, drag: CGFloat = gripDrag) -> Bool {
-        after.minX - before.minX >= drag / 2
+        after.minX - before.minX >= max(drag / 2, 3)
+    }
+
+    /// #keeps-38.3 — the button-row points only, in `gripProfile`'s order: close-button top, the close/minimize
+    /// gap at the row's middle, the minimize/zoom gap. Fallback points are dropped: they can be a Chrome tab.
+    /// `gripProfile` gives both close/minimize gap points the same source, so they're told apart by height:
+    /// the one with the greater `y` (the row's middle) is kept. The other sits at close-button top's height,
+    /// which never moved a native window on macOS 27. A window whose buttons touch its top edge produced only
+    /// one gap point — the row's middle — and keeps it.
+    public static func rowCandidates(_ candidates: [GripCandidate]) -> [GripCandidate] {
+        let keptGap = candidates.filter { $0.source == .trafficLightGap }.max { $0.point.y < $1.point.y }
+        return candidates.filter { c in
+            switch c.source {
+            case .knownGoodFallback: return false
+            case .trafficLightGap: return c == keptGap
+            case .closeButtonTop, .trafficLightRow: return true
+            }
+        }
+    }
+
+    /// The points one window is pressed at, in order: its button-row points, or — when it has no button
+    /// row — its first candidate alone, once, exactly as before #keeps-38.
+    public static func gripTries(_ candidates: [GripCandidate]) -> [GripCandidate] {
+        let row = rowCandidates(candidates)
+        return row.isEmpty ? Array(candidates.prefix(1)) : row
     }
 
     /// Keep only candidates on the same physical display as the target window. A spanning window can contain a
@@ -559,6 +656,10 @@ public enum Carry {
         switch await grabTitlebar(cap, bounds: bounds) {
         case .success(let point):
             initialParked = point
+        case .failure(.userInterrupt):
+            // #keeps-38: the hand moved during a press — stop the run, exactly like the place-leg abort.
+            log.info("carry wid=\(cap.cgWindowId) ABORTED during the grab (cursor drift)")
+            return .aborted(.userInterrupt)
         case .failure(let reason):
             log.info("carry wid=\(cap.cgWindowId) grip failed: \(reason.rawValue, privacy: .public)")
             return .failed(reason)
@@ -695,7 +796,8 @@ public enum Carry {
     }
 
     /// Best-effort frame restitution after a failed cross-display landing — the same public-AX write, aimed back.
-    /// #keeps-26: the proof drag nudged the window `gripDrag` px; a carry that then doesn't finish puts it back.
+    /// #keeps-26/#keeps-38: the proof drag nudged the window (2–40px, where it followed); a carry that then doesn't
+    /// finish puts it back.
     /// Only when the frame actually differs — a window the drag never moved is left untouched.
     private static func restituteIfMoved(_ cap: CapturedWindow, from bounds: CGRect) {
         guard let now = onScreenBounds(cap.cgWindowId) else {
@@ -854,11 +956,12 @@ public enum Carry {
         return hypot(cur.x - expected.x, cur.y - expected.y) > driftThreshold
     }
 
-    /// Grab the window and PROVE the grab (#keeps-26): press the first on-display grip candidate (close-button-top,
-    /// one attempt — grill Q1), drag it `gripDrag` px right, poll the window's bounds for up to 600ms until it has
-    /// followed by half the drag (`gripTook`), and only then succeed. A window that doesn't follow is released,
-    /// restituted if it moved at all, and skipped as `gripNotTaken` — no Space switch is ever attempted for it.
-    /// Returns the last drag point as the parked hold point (the caller must release it).
+    /// Grab the window and PROVE the grab before any Space switch (#keeps-26, #keeps-38). Each of the window's
+    /// grip points is pressed in turn (`gripTries` — the button row, or the lone first candidate): step-drag until
+    /// the window follows (`tryGrip`), and succeed on the first point it does. A point that doesn't take is put
+    /// back, and the next one waits out the double-click interval, so two presses never read as a titlebar
+    /// double-click. A hand-stop ends the run; a window that vanished ends this window. No Space switch is ever
+    /// attempted for a window no point moved. Returns the parked hold point (the caller must release it).
     private static func grabTitlebar(_ cap: CapturedWindow, bounds: CGRect) async -> Result<CGPoint, CarrySkip> {
         let buttons = axElement(for: cap).map { axButtonFrames(for: $0) }
             ?? ChromeButtonFrames(close: nil, minimize: nil, zoom: nil)
@@ -872,45 +975,99 @@ public enum Carry {
             return .failure(.offDisplayGrip)
         }
 
-        let candidate = candidates[0]
-        let p = candidate.point
+        let tries = gripTries(candidates)
+        for (i, c) in tries.enumerated() {
+            // Press where the window IS: a put-back that missed leaves it off its pre-grab frame.
+            var frame = bounds
+            if i > 0 {
+                guard let now = onScreenBounds(cap.cgWindowId) else { return .failure(.gripNotTaken) }
+                frame = now
+            }
+            let p = CGPoint(x: c.point.x + frame.minX - bounds.minX, y: c.point.y + frame.minY - bounds.minY)
+            let (attempt, parked) = await tryGrip(cap, c, at: p, before: frame, original: bounds,
+                                                  index: i, of: tries.count)
+            log.info("\(attempt.osLogLine, privacy: .public)")
+            if DebugTrace.enabled && DebugTrace.traces(bundleId: cap.bundleId, title: cap.title) {
+                DebugTrace.log(attempt.traceLine)   // #keeps-38.2: the evidence outlives os_log's memory-only info level
+            }
+            switch attempt.verdict {
+            case .followed: return .success(parked)
+            case .stoppedByHand, .stoppedBeforePress: return .failure(.userInterrupt)
+            case .vanished: return .failure(.gripNotTaken)
+            case .notFollowed:
+                restituteIfMoved(cap, from: bounds)
+                if i < tries.count - 1 {
+                    try? await Task.sleep(for: .seconds(NSEvent.doubleClickInterval))
+                }
+            }
+        }
+        return .failure(.gripNotTaken)
+    }
+
+    /// One press at `p`, proved by a step drag (#keeps-38.1). Posts only `leftMouseDragged`, 2px at a time, and
+    /// reads the window after each step until it follows (`gripTook`) or the point's `dragLimit` is reached; then
+    /// polls 600ms more for a late app. The hand is heard before the press, at every step and on every poll read.
+    /// Every exit that posted a mouse-down, except `followed`, posts the mouse-up: a hand-stop at the live cursor
+    /// (and puts the window back to `original`), a vanished window where the cursor is, a press that never took
+    /// at `p` after dragging back to it — so the release never lands on minimize or zoom. `followed` returns the
+    /// held point; the caller owns that release.
+    private static func tryGrip(_ cap: CapturedWindow, _ c: GripCandidate, at p: CGPoint, before frame: CGRect,
+                                original: CGRect, index: Int, of count: Int) async -> (GripTry, CGPoint) {
+        let limit = dragLimit(for: c.source)
+        func record(_ verdict: GripTry.Verdict, dragged: CGFloat, after: CGRect?,
+                    since t0: ContinuousClock.Instant?) -> GripTry {
+            GripTry(bundleId: cap.bundleId, cgWindowId: cap.cgWindowId, title: cap.title, source: c.source,
+                    point: p, windowOrigin: frame.origin, index: index, of: count, limit: limit, dragged: dragged,
+                    verdict: verdict,
+                    moved: after.map { CGVector(dx: $0.minX - frame.minX, dy: $0.minY - frame.minY) },
+                    ms: t0.map { Int((ContinuousClock.now - $0) / .milliseconds(1)) })
+        }
+        // Hear the hand first: `parkCursor` resets the baseline the drift is measured from.
+        if userMoved() { return (record(.stoppedBeforePress, dragged: 0, after: frame, since: nil), p) }
         parkCursor(to: p)
         try? await Task.sleep(for: .milliseconds(120))
+        let t0 = ContinuousClock.now + .milliseconds(80)   // `beginWindowGrab` posts the mouse-down 80ms in
         _ = beginWindowGrab(at: p)
         try? await Task.sleep(for: .milliseconds(150))
-        // #keeps-26: prove the grab before anything switches. A bare mouse-down carries only apps that hand it
-        // straight to WindowServer's window-move; a custom titlebar starts the move on the first drag event.
-        // Every drag point goes through `parkCursor` so the drift-abort measures from where the cursor IS —
-        // the drag moves the hardware cursor `gripDrag` px, and `driftThreshold` is 12.
-        var parked = p
-        for q in dragPath(from: p) {
-            dragHeldWindow(to: q)
-            parkCursor(to: q)
-            parked = q
-            try? await Task.sleep(for: .milliseconds(60))
+
+        var q = p
+        func stoppedByHand() -> (GripTry, CGPoint) {
+            endWindowGrab(at: cursorLocation() ?? q)   // under the hand, never warped back (#keeps-26 H6)
+            let after = onScreenBounds(cap.cgWindowId)
+            restituteIfMoved(cap, from: original)
+            return (record(.stoppedByHand, dragged: q.x - p.x, after: after, since: t0), q)
         }
-        // Poll, don't read once: June 2026's drag-and-prove read Zed as delta=(0,0) on one run and carried it on
-        // the next with the same point — the read raced the app's move.
-        let started = ContinuousClock.now
-        var after = onScreenBounds(cap.cgWindowId)
-        var waited = 0.0
-        while waited < 0.6, !(after.map { gripTook(before: bounds, after: $0) } ?? false) {
-            try? await Task.sleep(for: .milliseconds(150)); waited += 0.15
-            after = onScreenBounds(cap.cgWindowId)
+        func vanished() -> (GripTry, CGPoint) {
+            endWindowGrab(at: cursorLocation() ?? q)
+            return (record(.vanished, dragged: q.x - p.x, after: nil, since: t0), q)
         }
-        let took = after.map { gripTook(before: bounds, after: $0) } ?? false
-        // `moved=?` when the window vanished mid-grab — distinguishable from "didn't move" in the trace.
-        let moved = after.map { "(\(Int($0.minX - bounds.minX)),\(Int($0.minY - bounds.minY)))" } ?? "?"
-        let ms = Int((ContinuousClock.now - started) / .milliseconds(1))
-        log.info("grab wid=\(cap.cgWindowId) source=\(candidate.source.rawValue, privacy: .public) point=(\(Int(p.x)),\(Int(p.y))) proof moved=\(moved, privacy: .public) after=\(ms)ms took=\(took)")
-        guard took else {
-            endWindowGrab(at: parked)
-            // A partial move under the bar is still a move — "left where it was" has to be true. Fresh read after
-            // the mouse-up, logged — the same restitution every other non-carried exit uses.
-            restituteIfMoved(cap, from: bounds)
-            return .failure(.gripNotTaken)
+        for step in stepPath(from: p, limit: limit) {
+            if userMoved() { return stoppedByHand() }
+            dragHeldWindow(to: step)
+            expectedCursor = step   // the drag moved the cursor; posting a button-less move would change the stream
+            q = step
+            try? await Task.sleep(for: .milliseconds(40))
+            guard let after = onScreenBounds(cap.cgWindowId) else { return vanished() }
+            if gripTook(before: frame, after: after, drag: q.x - p.x) {
+                return (record(.followed(at: q.x - p.x), dragged: q.x - p.x, after: after, since: t0), q)
+            }
         }
-        return .success(parked)
+        // A late app: poll at the limit before calling the point dead.
+        for _ in 0..<4 {
+            try? await Task.sleep(for: .milliseconds(150))
+            if userMoved() { return stoppedByHand() }
+            guard let after = onScreenBounds(cap.cgWindowId) else { return vanished() }
+            if gripTook(before: frame, after: after, drag: limit) {
+                return (record(.followed(at: limit), dragged: q.x - p.x, after: after, since: t0), q)
+            }
+        }
+        dragHeldWindow(to: p)
+        expectedCursor = p
+        try? await Task.sleep(for: .milliseconds(150))
+        if userMoved() { q = p; return stoppedByHand() }   // a release at `p` would warp the cursor back under the hand
+        let after = onScreenBounds(cap.cgWindowId)
+        endWindowGrab(at: p)
+        return (record(.notFollowed, dragged: q.x - p.x, after: after, since: t0), p)
     }
 
     private static func axButtonFrames(for window: AXUIElement) -> ChromeButtonFrames {
