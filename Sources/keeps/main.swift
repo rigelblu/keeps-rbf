@@ -172,6 +172,8 @@ import UserNotifications
        : "DRY RUN — would carry \(r.plannedCarries)")
        + " of \(deferred) deferred windows (background + cross-display; \(snap.windows.count) captured), fp=\(fp)")
    print("skipped \(r.skipped): [\(skipStr)]")
+   // #keeps-36.2: this process has no tally and no verdict, so it names the miss, not what a banner would count.
+   if apply { print("not on screen with no AX element: \(r.quietMisses) (raise=noAXElement)") }
    if args.contains("--verbose") {
      for o in r.outcomes.sorted(by: { $0.outcome < $1.outcome }) {
        let leg = (o.fromGlobal.map(String.init) ?? "?") + "→" + (o.toGlobal.map(String.init) ?? "?")
@@ -277,6 +279,9 @@ import UserNotifications
    // guards every other writer, incl. tick()'s uncancellable deferred reset, checked at fire time) and the
    // status item animates with live progress (◐ 2/5; Reduce Motion → static ⟳ 2/5).
    private var isCarrying = false
+   // #keeps-36.2: windows the carry reached and couldn't find, with no AX element — in memory only, so a relaunch
+   // offers every window again. Main-actor state like the rest of this class; one carry runs at a time.
+   private var missTally = CarryMissTally()
    private var carryTimer: Timer?
    private var carryFrame = 0
    private var carryProgress: (done: Int, total: Int)?
@@ -459,7 +464,10 @@ import UserNotifications
      }
      guard ensureAccessibility() else { return false }  // lazy prompt + Needs-Accessibility state; no-op until granted
      do {
-       let r = Restore.restore(try store.load(fingerprint: fp), apply: true)
+       let r = Restore.restore(
+         try store.load(fingerprint: fp), apply: true, tracked: missTally.tracked,
+         notOffered: missTally.notOffered)
+       clearSeen(r.seenReal)
        guard !r.readFailed else {
          log.error("restore (\(reason, privacy: .public)): SkyLight read failed (cid==0)")
          tick("⚠")
@@ -524,8 +532,9 @@ import UserNotifications
      }
      note("Carrying desktops… (move the mouse to stop)")
      startCarrySignifier()  // #keeps-19: the run owns the glyph from here to finishCarry
+     let tracked = missTally.tracked, notOffered = missTally.notOffered
      Task { @MainActor in
-       let r = await Carry.carry(snap, apply: true) { p in
+       let r = await Carry.carry(snap, apply: true, tracked: tracked, notOffered: notOffered) { p in
          DispatchQueue.main.async {
            self.carryProgress = (p.done, p.total)  // #keeps-19: the timer renders this on its next frame
            self.note("Carrying \(p.done)/\(p.total) · desktop \(p.toDesktop)…")
@@ -567,6 +576,9 @@ import UserNotifications
 
    private func finishCarry(_ r: Carry.CarryResult, fp: String) {
      stopCarrySignifier()  // #keeps-19: FIRST, before any early return — a bottom-placed stop would leak the timer
+     // #keeps-36.2: before the early returns, which carry no outcomes anyway. Aborted runs record too.
+     let absorbed = missTally.absorb(seenReal: r.seenReal, outcomes: r.outcomes)
+     logBack(absorbed.back)
      if r.readFailed {
        log.error("carry: SkyLight read failed (cid==0)")
        note("Carry failed — SkyLight read")
@@ -600,9 +612,23 @@ import UserNotifications
      let abortNote = r.aborted ? " · stopped after \(r.abortedAfter)" : ""
      note("Last restored: \(stamp()) · \(r.carried) carried\(abortNote)")
      // #keeps-13: a clean carry fulfills the offer; an abort keeps it so the user can resume the remainder.
-     if !r.aborted { pendingCarry = nil }
+     // #keeps-36.2: …minus the windows this run just stopped offering, so the badge counts only what a tap can bring.
+     pendingCarry =
+       r.aborted
+       ? CarryAffordance.afterStoppedRun(pendingCarry, newlyStopped: absorbed.newlyStopped.count) : nil
      notifyVerdict(r)  // #keeps-19: the run's outcome is delivered, not fetched
      tick(r.aborted ? "⚠" : "⟳")
+   }
+
+   /// #keeps-36.2: forget windows a Restore saw on screen or in AX (a carry run goes through `absorb`).
+   private func clearSeen(_ ids: Set<CGWindowID>) { logBack(missTally.clear(ids)) }
+
+   /// The one writer of `[offer:back]`, for the restore and the carry alike. A window comes back only once: the
+   /// clear that returns it removes it, so the carry right after a restore can't log it again.
+   private func logBack(_ back: Set<CGWindowID>) {
+     for wid in back.sorted() {
+       DebugTrace.log("[offer:back] wid=\(wid) — found on screen or by Accessibility; offered again")
+     }
    }
 
    // Restore needs Accessibility (capture didn't). Lazy: prompt on first need, raise a standing condition,

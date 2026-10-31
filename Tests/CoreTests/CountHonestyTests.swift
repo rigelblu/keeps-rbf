@@ -34,6 +34,7 @@
 // the code against its two neighbours (`poll`, `pollWindowGlobal`), both of which do the post-loop read the
 // first draft omitted. Recorded here so the next reader knows the suite's real boundary, and does not mistake
 // 153 green for coverage of the mechanism.
+import CoreGraphics
 import Foundation
 import Testing
 
@@ -209,6 +210,34 @@ import Testing
     #expect(Carry.CarrySkip.frameNotHeld != Carry.CarrySkip.axPlaceFailed)
     #expect(Carry.CarrySkip.frameNotHeld.rawValue == "frameNotHeld")
     #expect(Carry.CarrySkip.allCases.contains(.frameNotHeld))
+  }
+
+  // MARK: - #keeps-36.2: a window keeps stopped offering leaves the offer count too
+
+  /// Offer, badge and plan must agree: restore turns a not-offered window's carry-deferred ACTION into a skip
+  /// with its own reason, so `carryDeferred` (the offer count) leaves it out with no change to its formula.
+  @Test func withholdNotOfferedLeavesTheOfferCount() {
+    func saved(_ wid: UInt32) -> CapturedWindow {
+      CapturedWindow(
+        bundleId: "com.google.Chrome.beta", pid: 1, title: nil, cgWindowId: wid,
+        displayUUID: "DISPLAY-A", desktopOrdinal: 1, spaceUUID: "SPACE-BACKGROUND",
+        frame: WindowFrame(x: 0, y: 0, w: 400, h: 80), spaceIds: [3], sticky: false, onScreen: false)
+    }
+    let remap: [CGWindowID: CGWindowID] = [100: 5649, 101: 5644, 102: 5650]
+    let out = Restore.withholdNotOffered(
+      [
+        (saved(100), .skip(.deferredBackground)), (saved(101), .skip(.deferredBackground)),
+        (saved(102), .place(WindowFrame(x: 0, y: 0, w: 400, h: 80), verifySpace: false)),
+      ], remap: remap, notOffered: [5649, 5650])
+    #expect(out.map(\.1) == [
+      .skip(.notOffered), .skip(.deferredBackground),
+      .place(WindowFrame(x: 0, y: 0, w: 400, h: 80), verifySpace: false),
+    ])
+    #expect(out.map(\.0) == [saved(100), saved(101), saved(102)])
+    let result = Restore.Result(
+      planned: 0, applied: 0, failures: 0, skips: [.deferredBackground: 1, .notOffered: 1], outcomes: [],
+      dryRun: false, readFailed: false)
+    #expect(result.carryDeferred == 1)
   }
 
   // MARK: - Fixture

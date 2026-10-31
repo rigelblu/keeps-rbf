@@ -34,6 +34,9 @@ public enum Restore {
     // #keeps-5: a live window holds this id, but it belongs to a different app than the one captured. NOT
     // carry work — the carry can't fix an identity problem either, so this must never reach the offer count.
     case identityMismatch
+    // #keeps-36.2: carry work the menu-bar app stopped offering — twice in a row the carry reached its desktop and
+    // found it neither on screen nor in AX. Not carry-deferred, so the offer count and the badge leave it out.
+    case notOffered
   }
 
   enum Action: Equatable {
@@ -246,6 +249,20 @@ public enum Restore {
     }
   }
 
+  /// #keeps-36.2: a carry-deferred window whose live id (`remap[cap.cgWindowId]`) keeps stopped offering becomes
+  /// `.skip(.notOffered)`; every other pair passes through. It changes the ACTION, so the restore loop counts it
+  /// under its own reason and writes its line. Pure `decide` is untouched.
+  static func withholdNotOffered(
+    _ classified: [(CapturedWindow, Action)], remap: [CGWindowID: CGWindowID],
+    notOffered: Set<CGWindowID>
+  ) -> [(CapturedWindow, Action)] {
+    classified.map { cap, action in
+      guard Carry.isCarryDeferred(action), let live = remap[cap.cgWindowId], notOffered.contains(live)
+      else { return (cap, action) }
+      return (cap, .skip(.notOffered))
+    }
+  }
+
   // MARK: - Id resolution (#keeps-5.4 cold start, #keeps-30 same-session relaunch)
 
   /// How a run's captured ids were resolved to live ids — the map every consumer reads, plus the counts that
@@ -382,6 +399,8 @@ public enum Restore {
     // identically to one that matched exactly, or the user learns the wrong thing about what keeps knows.
     public var coldStart: Bool = false
     public var coldStartMatched: Int = 0
+    /// #keeps-36.2: tracked ids this run read on screen or found in AX — the host clears them from its tally.
+    public var seenReal: Set<CGWindowID> = []
     public var deferredBackground: Int { skips[.deferredBackground] ?? 0 }  // the #keeps-12 handoff size
     /// The carry-owned deferrals — background-Space windows, the #keeps-17 guard's cross-display ones, and
     /// visible windows sitting on a wrong Space. The MVP offer's honest count (#keeps-17.3): everything a
@@ -404,8 +423,12 @@ public enum Restore {
   /// Read back `snapshot` and place each captured window where it was, via public AX (silent). `apply == false`
   /// is a DRY RUN — it plans and counts but moves nothing (the safe default). Only windows reachable on an
   /// active desktop are placed; background-desktop matches are counted `deferredBackground` for #keeps-12.
+  ///
+  /// #keeps-36.2: `tracked` and `notOffered` are the host's `CarryMissTally` sets (live ids). A not-offered window
+  /// is withheld from the offer unless this run reads it on screen or finds it in AX (`Result.seenReal`).
   public static func restore(
-    _ snapshot: Snapshot, apply: Bool, tolerance: Int = Restore.frameTolerance
+    _ snapshot: Snapshot, apply: Bool, tolerance: Int = Restore.frameTolerance,
+    tracked: Set<CGWindowID> = [], notOffered: Set<CGWindowID> = []
   ) -> Result {
     guard let live = gatherLiveState() else {  // SkyLight load failed → act on nothing (M4)
       return Result(
@@ -458,7 +481,12 @@ public enum Restore {
         "=== restore fp=\(snapshot.configFingerprint) apply=\(apply)\(DebugTrace.focusNote) — displays: "
           + DebugTrace.displaysHeader(dbg))
     }
-    for (cap, action) in classify(snapshot, against: live, tolerance: tolerance, remap: remap) {
+    let seenReal = CarryMissTally.seenReal(
+      tracked: tracked, reachable: Set(live.reachable.keys), onScreen: live.existence.onScreen)
+    let classified = withholdNotOffered(
+      classify(snapshot, against: live, tolerance: tolerance, remap: remap), remap: remap,
+      notOffered: notOffered.subtracting(seenReal))
+    for (cap, action) in classified {
       // Same resolve-or-refuse rule as `matchFor`. An unresolved window never reaches a `.place` (it
       // classified `gone`), so this only has to be self-consistent — but a raw fallback here would still
       // read a stranger's frame into the trace's "before", which is how a wrong-window bug hides in plain sight.
@@ -520,10 +548,13 @@ public enum Restore {
       case .skip(let reason):
         skips[reason, default: 0] += 1
         if DebugTrace.enabled && DebugTrace.traces(bundleId: cap.bundleId, title: cap.title) {
+          // #keeps-36.2: restore lines print the saved record's id, carry lines the live one; `live=` joins them.
+          let decision =
+            reason == .notOffered ? "skip:notOffered live=\(wid)" : "skip:\(reason.rawValue)"
           DebugTrace.log(
             DebugTrace.windowLine(
               bundleId: cap.bundleId, title: cap.title, wid: cap.cgWindowId,
-              decision: "skip:\(reason.rawValue)", desired: cap.frame, before: before, after: nil,
+              decision: decision, desired: cap.frame, before: before, after: nil,
               displays: dbg))
         }
       }
@@ -535,7 +566,7 @@ public enum Restore {
     return Result(
       planned: planned, applied: applied, failures: failures, skips: skips,
       outcomes: outcomes, dryRun: !apply, readFailed: false,
-      coldStart: coldStart, coldStartMatched: coldStart ? resolution.count : 0)
+      coldStart: coldStart, coldStartMatched: coldStart ? resolution.count : 0, seenReal: seenReal)
   }
 
   // MARK: - I/O helpers
@@ -570,6 +601,9 @@ public enum Restore {
     /// needs the live pid so a re-matched window's log lines name the process that actually owns it.
     let identities: [pid_t: String]
     let ownerPids: [CGWindowID: pid_t]
+    /// #keeps-36.2: ids whose `kCGWindowIsOnscreen` is true — one of the two proofs a window keeps stopped
+    /// offering is real. Defaults to empty so a memberwise `Existence(...)` without it still compiles.
+    var onScreen: Set<CGWindowID> = []
   }
 
   /// Live windows reachable via public AX — i.e. on each display's ACTIVE desktop (+ minimized). Keyed by
@@ -606,6 +640,7 @@ public enum Restore {
     var owners: [CGWindowID: String] = [:]
     var normalLayer = Set<CGWindowID>()
     var ownerPids: [CGWindowID: pid_t] = [:]
+    var onScreen = Set<CGWindowID>()
     let identities = AppIdentity.liveMap()  // #keeps-5: one read, reused for every window below
     for info in (CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]])
       ?? []
@@ -620,10 +655,11 @@ public enum Restore {
         if let id = identities[pid] { owners[wid] = id }
       }
       if (info[kCGWindowLayer as String] as? Int ?? -1) == 0 { normalLayer.insert(wid) }
+      if info[kCGWindowIsOnscreen as String] as? Bool == true { onScreen.insert(wid) }
     }
     return Existence(
       ids: ids, frames: frames, owners: owners, normalLayer: normalLayer, identities: identities,
-      ownerPids: ownerPids)
+      ownerPids: ownerPids, onScreen: onScreen)
   }
 
   /// Lift one captured window's live state into a pure `Match` (nil ⇒ gone).

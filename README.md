@@ -135,6 +135,8 @@ bash scripts/package-dmg.sh                   # wrap that bundle in a drag-to-Ap
 ./.build/keeps.app/Contents/MacOS/keeps --restore-once          # dry-run: print what restore would do (moves nothing)
 ./.build/keeps.app/Contents/MacOS/keeps --restore-once --apply  # silently restore this Space's windows for real
 ./.build/keeps.app/Contents/MacOS/keeps --carry-once            # dry-run the cross-Space carry plan
+#   --carry-once runs in its own process: it plans every deferred window, including ones the menu-bar app has
+#   stopped offering, and with --apply it prints the raw count plus how many were not on screen with no AX element
 ./.build/keeps.app/Contents/MacOS/keeps --print                 # dump the snapshot JSON to stdout
 ./.build/keeps.app/Contents/MacOS/keeps --watch                 # log each display-reconfig event live
 ```
@@ -162,6 +164,12 @@ to read or move a single window — and it will look like a keeps bug rather tha
 
 Every title-bar press writes a `[grab]` line — where keeps pressed, how far it dragged, how far the window
 moved — so `grep '\[grab\]' ~/Library/Logs/keeps-debug.log` answers "why didn't it move".
+
+A verdict leaves out a window keeps reached but couldn't find on screen, and whose app gave it no Accessibility
+element; `[carry:summary]` says how many. After two such misses in a row keeps stops offering that window until a
+Restore or an offer tap finds it on screen or finds its Accessibility element, or keeps relaunches — for a window
+on another desktop, usually the relaunch. `[carry:notOffered]`, `[skip:notOffered]` and `[offer:back]` say which
+and why: `grep -E 'notOffered|offer:back|carry:summary' ~/Library/Logs/keeps-debug.log`.
 
 Snapshots are written one-per-setup to `~/Library/Application Support/com.rigelblu.keeps/configs/`.
 Capture needs no special permission; window *titles* require Screen Recording (optional). **Restore**

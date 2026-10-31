@@ -131,6 +131,41 @@ import Testing
     #expect(Carry.Outcome.raiseEvidence(true) == "raise=ok")
   }
 
+  // #keeps-36.2: a window keeps stopped offering is left out of the plan, by name, and its line says why.
+  private func chromeBeta(_ wid: UInt32) -> Carry.DeferredWindow {
+    Carry.DeferredWindow(
+      captured: CapturedWindow(
+        bundleId: "com.google.Chrome.beta", pid: 42, title: nil, cgWindowId: wid,
+        displayUUID: "DISP-0", desktopOrdinal: 1, spaceUUID: "d0s0",
+        frame: WindowFrame(x: 0, y: 0, w: 634, h: 458), spaceIds: [1], sticky: false, onScreen: false),
+      currentGlobalDesktop: 6)
+  }
+
+  @Test func planSkipsNotOffered() {
+    let w5649 = chromeBeta(5649), w5644 = chromeBeta(5644)
+    #expect(
+      Carry.plan(deferred: [w5649, w5644], spaceIndex: index(), shortcuts: navAll(), notOffered: [5649])
+        == [
+          .skip(.notOffered, w5649.captured), .carry(w5644.captured, fromGlobal: 6, toGlobal: 1),
+        ])
+    #expect(
+      Carry.plan(deferred: [w5649, w5644], spaceIndex: index(), shortcuts: navAll(), notOffered: [])
+        == [
+          .carry(w5649.captured, fromGlobal: 6, toGlobal: 1),
+          .carry(w5644.captured, fromGlobal: 6, toGlobal: 1),
+        ])
+  }
+
+  @Test func skipOutcomeSaysWhyNotOffered() {
+    let w5649 = chromeBeta(5649).captured
+    #expect(
+      Carry.skipOutcome(.notOffered, cap: w5649, from: 6, to: 1).traceLine
+        == "[carry:notOffered] com.google.Chrome.beta wid=5649 \"\" — desktop 6→1 — 2 misses in a row, raise=noAXElement")
+    let home = Carry.skipOutcome(.alreadyOnDesktop, cap: w5649, from: 1, to: 1)
+    #expect(home.evidence == nil)
+    #expect(home.onScreenCheck == nil)
+  }
+
   @Test func skipsUnreachableWhenTargetNeedsUnboundShortcut() {  // global 17 needs stepping; jumpsOnly has none
     #expect(
       plan(deferred("d1s4", current: 3), jumpsOnly()) == .skip(.unreachableShortcut, cap("d1s4")))

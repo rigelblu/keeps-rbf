@@ -9,6 +9,18 @@ import Testing
   private let docked = "80bc74744ed01909"
   private let undocked = "8a09103d5a98d868"
 
+  // #keeps-36.2: a stopped run keeps its offer, minus the windows that run just stopped offering.
+  @Test func aStoppedRunDropsTheWindowsItStoppedOffering() {
+    let pending = PendingCarry(fingerprint: docked, count: 3)
+    #expect(
+      CarryAffordance.afterStoppedRun(pending, newlyStopped: 1)
+        == PendingCarry(fingerprint: docked, count: 2))
+    #expect(
+      CarryAffordance.afterStoppedRun(PendingCarry(fingerprint: docked, count: 1), newlyStopped: 1) == nil)
+    #expect(CarryAffordance.afterStoppedRun(nil, newlyStopped: 1) == nil)
+    #expect(CarryAffordance.afterStoppedRun(pending, newlyStopped: 0) == pending)
+  }
+
   @Test func strandedWindowsRaiseAnOffer() {  // windows remain on other Spaces → offer the one-tap carry
     #expect(
       CarryAffordance.afterRestore(fingerprint: docked, deferred: 3)
