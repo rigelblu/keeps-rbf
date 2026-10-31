@@ -24,11 +24,13 @@ import UserNotifications
  // Run the async carry to completion synchronously for the CLI path (the menu drives it as a Task instead, so its
  // ~1.1s/step waits never freeze the UI). The carry yields on its own executor; main just blocks until it's done.
  // Live progress goes to stderr so it doesn't tangle with the summary on stdout.
- func runCarry(_ snapshot: Snapshot, apply: Bool) -> Carry.CarryResult {
+ // #keeps-36.3: `usableHeights` is read on the main thread BEFORE the semaphore blocks it — the carry never hops to
+ // the main actor, which this blocked thread could never serve.
+ func runCarry(_ snapshot: Snapshot, apply: Bool, usableHeights: [String: Int]) -> Carry.CarryResult {
    let sem = DispatchSemaphore(value: 0)
    var result: Carry.CarryResult!
    Task.detached {
-     result = await Carry.carry(snapshot, apply: apply) { p in
+     result = await Carry.carry(snapshot, apply: apply, usableHeights: usableHeights) { p in
        guard apply else { return }
        FileHandle.standardError.write(
          "  carrying \(p.done)/\(p.total) · desktop \(p.toDesktop) · \(p.bundleId)\n".data(
@@ -86,7 +88,7 @@ import UserNotifications
      )
      exit(1)
    }
-   let r = Restore.restore(snap, apply: apply)
+   let r = Restore.restore(snap, apply: apply, usableHeights: Restore.usableHeights())  // #keeps-36.3: main thread
    if r.readFailed {
      print("SkyLight read failed (cid==0) — restored nothing")
      exit(1)
@@ -146,7 +148,7 @@ import UserNotifications
      )
      exit(1)
    }
-   let r = runCarry(snap, apply: apply)
+   let r = runCarry(snap, apply: apply, usableHeights: Restore.usableHeights())  // #keeps-36.3: main thread
    if r.readFailed {
      print("SkyLight read failed (cid==0) — carried nothing")
      exit(1)
@@ -466,7 +468,7 @@ import UserNotifications
      do {
        let r = Restore.restore(
          try store.load(fingerprint: fp), apply: true, tracked: missTally.tracked,
-         notOffered: missTally.notOffered)
+         notOffered: missTally.notOffered, usableHeights: Restore.usableHeights())  // #keeps-36.3: main thread
        clearSeen(r.seenReal)
        guard !r.readFailed else {
          log.error("restore (\(reason, privacy: .public)): SkyLight read failed (cid==0)")
@@ -533,8 +535,11 @@ import UserNotifications
      note("Carrying desktops… (move the mouse to stop)")
      startCarrySignifier()  // #keeps-19: the run owns the glyph from here to finishCarry
      let tracked = missTally.tracked, notOffered = missTally.notOffered
+     let usableHeights = Restore.usableHeights()  // #keeps-36.3: read here, on the main thread, before the run
      Task { @MainActor in
-       let r = await Carry.carry(snap, apply: true, tracked: tracked, notOffered: notOffered) { p in
+       let r = await Carry.carry(
+         snap, apply: true, tracked: tracked, notOffered: notOffered, usableHeights: usableHeights
+       ) { p in
          DispatchQueue.main.async {
            self.carryProgress = (p.done, p.total)  // #keeps-19: the timer renders this on its next frame
            self.note("Carrying \(p.done)/\(p.total) · desktop \(p.toDesktop)…")

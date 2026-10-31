@@ -40,10 +40,14 @@ public enum Carry {
         /// window already on its target desktop — including ones whose size/position had drifted, which
         /// restore had counted as carry work. `nil` ⇒ unknown ⇒ treated as already-home (fail-safe).
         public let liveFrame: WindowFrame?
-        public init(captured: CapturedWindow, currentGlobalDesktop: Int?, liveFrame: WindowFrame? = nil) {
+        /// #keeps-36.3: the usable height of the window's saved display, for `WindowFrame.isHome`. nil ⇒ no cap.
+        public let usableHeight: Int?
+        public init(captured: CapturedWindow, currentGlobalDesktop: Int?, liveFrame: WindowFrame? = nil,
+                    usableHeight: Int? = nil) {
             self.captured = captured
             self.currentGlobalDesktop = currentGlobalDesktop
             self.liveFrame = liveFrame
+            self.usableHeight = usableHeight
         }
     }
 
@@ -330,7 +334,8 @@ public enum Carry {
                 // pair `Restore.decide` uses. Skipping on the Space alone both overstated the offer (restore
                 // counted these) and left the frame with no repair path at all: restore can't reach a
                 // background window, and the carry walked past it. Unknown live frame ⇒ can't prove drift ⇒ skip.
-                guard let lf = dw.liveFrame, !cap.frame.matches(lf, tolerance: tolerance) else {
+                guard let lf = dw.liveFrame,
+                      !cap.frame.isHome(lf, tolerance: tolerance, usableHeight: dw.usableHeight) else {
                     return .skip(.alreadyOnDesktop, cap)
                 }
                 guard navigable(to, shortcuts) else { return .skip(.unreachableShortcut, cap) }
@@ -474,8 +479,9 @@ public enum Carry {
     /// run reads on screen or finds in AX is real: it's offered again and returned in `seenReal`.
     public static func carry(_ snapshot: Snapshot, apply: Bool,
                              tracked: Set<CGWindowID> = [], notOffered: Set<CGWindowID> = [],
+                             usableHeights: [String: Int] = [:],
                              onProgress: (Progress) -> Void = { _ in }) async -> CarryResult {
-        guard let live = Restore.gatherLiveState() else {   // SkyLight load failed → act on nothing (M4)
+        guard let live = Restore.gatherLiveState(usableHeights: usableHeights) else {   // SkyLight load failed → act on nothing (M4)
             return CarryResult(plannedCarries: 0, carried: 0, skips: [:], aborted: false, abortedAfter: 0,
                                outcomes: [], dryRun: !apply, readFailed: true, navigationDead: false)
         }
@@ -528,7 +534,8 @@ public enum Carry {
             let currentMid = cgsSpacesForWindow(cid, cap.cgWindowId).first
             return DeferredWindow(captured: cap,
                                   currentGlobalDesktop: currentMid.flatMap { index.globalOrdinal(ofManagedID: $0) },
-                                  liveFrame: live.existence.frames[cap.cgWindowId])  // #keeps-22
+                                  liveFrame: live.existence.frames[cap.cgWindowId],  // #keeps-22
+                                  usableHeight: live.usableHeight(for: cap))  // #keeps-36.3
         }
         let seenReal = CarryMissTally.seenReal(
             tracked: tracked, reachable: Set(live.reachable.keys), onScreen: live.existence.onScreen)
@@ -539,7 +546,8 @@ public enum Carry {
         }
         if DebugTrace.enabled {   // #keeps-15: carry header — the carry's view of the live arrangement (focus-noted)
             DebugTrace.log("=== carry fp=\(snapshot.configFingerprint) apply=\(apply)\(DebugTrace.focusNote) — displays: "
-                + DebugTrace.displaysHeader(DebugTrace.activeDisplays()))
+                + DebugTrace.displaysHeader(DebugTrace.activeDisplays())
+                + Restore.Topology.usableNote(usableHeights))
         }
 
         var carried = 0, done = 0, abortedAfter = 0, aborted = false
@@ -575,7 +583,8 @@ public enum Carry {
                 let reach = await reachForPlace(cap, onGlobal: on, index: index, shortcuts: shortcuts, cid: cid)
                 let check = onScreenCheck(reach)
                 switch await join(reach, found: { b in
-                    await placeFound(cap, onGlobal: on, preBounds: b, index: index, cid: cid)
+                    await placeFound(cap, onGlobal: on, preBounds: b, index: index, cid: cid,
+                                     usableHeight: dw.usableHeight)
                 }) {
                 case .carried:
                     carried += 1
@@ -610,7 +619,7 @@ public enum Carry {
                 let check = onScreenCheck(reach)
                 switch await join(reach, found: { b in
                     await carryFound(cap, fromGlobal: from, toGlobal: to, bounds: b, index: index,
-                                     shortcuts: shortcuts, cid: cid)
+                                     shortcuts: shortcuts, cid: cid, usableHeight: dw.usableHeight)
                 }) {
                 case .carried:
                     carried += 1
@@ -699,7 +708,7 @@ public enum Carry {
     }
 
     private static func placeFound(_ cap: CapturedWindow, onGlobal: Int, preBounds: CGRect, index: DesktopIndex,
-                                   cid: CGSConnectionID) async -> CarryOutcome {
+                                   cid: CGSConnectionID, usableHeight: Int?) async -> CarryOutcome {
         guard placeFrame(cap) else {
             log.info("place wid=\(cap.cgWindowId) axPlaced=false → axPlaceFailed")
             return .failed(.axPlaceFailed)
@@ -732,7 +741,8 @@ public enum Carry {
         // the captured position and merely clamped its size. `placeHeld.seen` is the only thing that could
         // say; the log line prints it, and nothing acts on it. See #keeps-29.
         return await verifyPlacement(
-            cap, "place wid=\(cap.cgWindowId) on=\(onGlobal) axPlaced=true membershipVerified", verb: "PLACED")
+            cap, "place wid=\(cap.cgWindowId) on=\(onGlobal) axPlaced=true membershipVerified", verb: "PLACED",
+            usableHeight: usableHeight)
     }
 
     /// #keeps-36.2: the carry's first half — log the leg, navigate to the window's desktop, raise, and the on-screen
@@ -761,7 +771,8 @@ public enum Carry {
     }
 
     private static func carryFound(_ cap: CapturedWindow, fromGlobal: Int, toGlobal: Int, bounds: CGRect,
-                                   index: DesktopIndex, shortcuts: Shortcuts, cid: CGSConnectionID) async -> CarryOutcome {
+                                   index: DesktopIndex, shortcuts: Shortcuts, cid: CGSConnectionID,
+                                   usableHeight: Int?) async -> CarryOutcome {
         let to = index.locate(global: toGlobal), from = index.locate(global: fromGlobal)
         log.info("carry wid=\(cap.cgWindowId) on screen at \(WindowFrame(bounds).map { "(\($0.x),\($0.y) \($0.w)×\($0.h))" } ?? "\(bounds)")")
         try? await Task.sleep(for: .milliseconds(700))   // settle the freshly-navigated desktop before grabbing
@@ -770,7 +781,7 @@ public enum Carry {
         // AX-place re-home path instead — branch BEFORE grabbing so the grip machinery stays out of it.
         guard let to, let from, to.displayIndex == from.displayIndex else {
             return await carryAcrossDisplays(cap, toGlobal: toGlobal, index: index, shortcuts: shortcuts,
-                                             cid: cid, preBounds: bounds)
+                                             cid: cid, preBounds: bounds, usableHeight: usableHeight)
         }
 
         let initialParked: CGPoint
@@ -847,7 +858,7 @@ public enum Carry {
         // proves the window holds the captured frame. Verify it before this counts as carried.
         return await verifyPlacement(
             cap, "carry wid=\(cap.cgWindowId) landedOn=\(landedOn ?? -1) target=\(toGlobal) axPlaced=true",
-            verb: "CARRIED")
+            verb: "CARRIED", usableHeight: usableHeight)
     }
 
     /// #keeps-17.2 — the cross-display carry: point the TARGET display's view at the captured Space
@@ -858,7 +869,7 @@ public enum Carry {
     /// Q3 boundary sample: real cursor movement since our last synthetic park aborts before the AX-place.
     private static func carryAcrossDisplays(_ cap: CapturedWindow, toGlobal: Int, index: DesktopIndex,
                                             shortcuts: Shortcuts, cid: CGSConnectionID,
-                                            preBounds: CGRect) async -> CarryOutcome {
+                                            preBounds: CGRect, usableHeight: Int?) async -> CarryOutcome {
         // place-leg (unheld) — switch the target display's view to the captured Space.
         guard await navigateView(toGlobal: toGlobal, index: index, shortcuts: shortcuts, cid: cid) else {
             log.info("carry wid=\(cap.cgWindowId) FAILED cross-display place-leg: couldn't reach to=\(toGlobal)")
@@ -908,7 +919,8 @@ public enum Carry {
         // claim that's stale. Re-polling membership on this branch belongs to #keeps-26, which owns the
         // cross-display path.
         return await verifyPlacement(
-            cap, "carry wid=\(cap.cgWindowId) cross-display landedOn=\(toGlobal)", verb: "CARRIED")
+            cap, "carry wid=\(cap.cgWindowId) cross-display landedOn=\(toGlobal)", verb: "CARRIED",
+            usableHeight: usableHeight)
     }
 
     /// Best-effort frame restitution after a failed cross-display landing — the same public-AX write, aimed back.
@@ -1261,10 +1273,11 @@ public enum Carry {
     /// seconds across a full layout. An unenumerated path left unnamed is this repo's most-repeated mistake;
     /// naming it here is the minimum, not the fix.
     ///
-    /// The bar is `WindowFrame.matches(tolerance:)` — position AND size, the same predicate `Restore.decide`
-    /// uses for `alreadyCorrect`. That is deliberate and it overrules `Restore.setFrame`'s "size is
-    /// best-effort" doc: if `decide` calls a window within ±2 already home, a place landing outside ±2 has
-    /// not brought it home, and one standard has to mean one thing. Position-only was not an option — the
+    /// The bar is `WindowFrame.isHome(_:tolerance:usableHeight:)` — position AND size, the same predicate
+    /// `Restore.decide` uses for `alreadyCorrect` and `Carry.plan` uses for `alreadyOnDesktop` (#keeps-36.3).
+    /// That is deliberate and it overrules `Restore.setFrame`'s "size is best-effort" doc: if `decide` calls a
+    /// window within ±2 already home, a place landing outside ±2 has not brought it home, and one standard has
+    /// to mean one thing. Position-only was not an option — the
     /// Safari case drifted in width at an identical position, so it would have passed.
     ///
     /// POLLED, not read once, for the same reason `#keeps-17`'s membership check had to be (Tom hit that live,
@@ -1272,8 +1285,8 @@ public enum Carry {
     /// actually worked. Reads back through `onScreenBounds` — CGWindowList bounds, the same coordinate source
     /// capture used, which `WindowFrame.matches` requires of both sides or the compare is meaningless.
     /// Returns the last frame seen so the caller can log what it got, not merely that it disagreed.
-    /// WHAT THIS PROVES, exactly: the window matched its captured frame on two consecutive reads one poll
-    /// interval apart. Not that it will KEEP it — "held" is a claim about the future and no finite
+    /// WHAT THIS PROVES, exactly: the window showed the saved frame, or that frame with its height capped at the
+    /// display's usable height, on two consecutive reads one poll interval apart. Not that it will KEEP it — "held" is a claim about the future and no finite
     /// observation can establish it, because the owning app may re-lay-out later for reasons we cannot see.
     ///
     /// TWO CONSECUTIVE, not first-match-wins (second-model review, 2026-07-29). The previous version returned
@@ -1333,7 +1346,8 @@ public enum Carry {
         /// Returns the last frame observed either way, so a caller can log what it actually got on a miss
         /// without paying a second read.
         static func verify(
-            _ cap: CapturedWindow, tolerance: Int = Restore.frameTolerance, timeout: Double = 1.2
+            _ cap: CapturedWindow, tolerance: Int = Restore.frameTolerance, timeout: Double = 1.2,
+            usableHeight: Int?
         ) async -> (held: FrameHeld?, lastSeen: WindowFrame?) {
             func read() -> WindowFrame? {
                 Carry.onScreenBounds(cap.cgWindowId).flatMap(WindowFrame.init)
@@ -1343,7 +1357,7 @@ public enum Carry {
             var waited = 0.0
             while true {
                 seen = read()
-                if let now = seen, cap.frame.matches(now, tolerance: tolerance) {
+                if let now = seen, cap.frame.isHome(now, tolerance: tolerance, usableHeight: usableHeight) {
                     if let first = firstMatchAt {   // confirmed — two in a row, one interval apart
                         return (FrameHeld(seen: now, matchedAtMillis: Int(first * 1000)), now)
                     }
@@ -1362,10 +1376,16 @@ public enum Carry {
     /// The ONE tail every place path ends on. `prefix` is the path's own context (which window, which
     /// desktop, what it already verified); the verdict half is written here so all three report identically
     /// and a fourth path gets the same line for free. Success is only constructible here — see `FrameHeld`.
-    private static func verifyPlacement(_ cap: CapturedWindow, _ prefix: String,
-                                        verb: String) async -> CarryOutcome {
-        let (held, lastSeen) = await FrameHeld.verify(cap)
+    ///
+    /// #keeps-36.3: `usableHeight` is the window's saved display's usable height, so a frame the screen caps
+    /// counts as home (`WindowFrame.isHome`). One write, one check; a miss writes `[carry:frameMiss]`.
+    private static func verifyPlacement(_ cap: CapturedWindow, _ prefix: String, verb: String,
+                                        usableHeight: Int?) async -> CarryOutcome {
+        let (held, lastSeen) = await FrameHeld.verify(cap, usableHeight: usableHeight)
         guard let held else {
+            if DebugTrace.enabled && DebugTrace.traces(bundleId: cap.bundleId, title: cap.title) {
+                DebugTrace.log(frameMissLine(cap: cap, seen: lastSeen, usable: usableHeight))
+            }
             log.info(
                 "\(prefix, privacy: .public) but frame drifted back: \(Carry.frameNote(cap, lastSeen), privacy: .public) → frameNotHeld")
             return .failed(.frameNotHeld)
@@ -1373,6 +1393,15 @@ public enum Carry {
         log.info(
             "\(prefix, privacy: .public) frameVerified \(Carry.heldNote(held), privacy: .public) → \(verb, privacy: .public)")
         return .carried(held)
+    }
+
+    /// #keeps-36.3: the `[carry:frameMiss]` file-trace line, written just before the leg's `frameNotHeld` —
+    /// what keeps saw, what it wanted, and the usable height it judged against. Pure, so a test pins its text.
+    static func frameMissLine(cap: CapturedWindow, seen: WindowFrame?, usable: Int?) -> String {
+        func frame(_ f: WindowFrame) -> String { "\(f.w)×\(f.h) at (\(f.x),\(f.y))" }
+        return "[carry:frameMiss] \(cap.bundleId) wid=\(cap.cgWindowId) \"\(cap.title ?? "")\" — "
+            + (seen.map { "saw \(frame($0))" } ?? "saw nothing on screen")
+            + ", wanted \(frame(cap.frame)), usable \(usable.map(String.init) ?? "?")"
     }
 
     /// What a verified place actually observed, for the success log line — see `FrameHeld`'s note on why a

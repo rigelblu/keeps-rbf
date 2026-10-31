@@ -190,6 +190,32 @@ import Testing
 
     #expect(restoreSaysHome(dx: drift, dw: 0) == carrySaysHome(dx: drift, dw: 0))  // position drift
     #expect(restoreSaysHome(dx: 0, dw: drift) == carrySaysHome(dx: 0, dw: drift))  // size drift
+
+    // #keeps-36.3: the screen caps the height below the saved one. Restore's BACKGROUND branch and the carry
+    // must agree on the capped window too, swept from 20px under the usable height to 20px over it.
+    let usable = home.h - 10
+    func liveCapped(_ dh: Int) -> WindowFrame { WindowFrame(x: home.x, y: home.y, w: home.w, h: usable + dh) }
+    func restoreBackgroundSaysHome(dh: Int) -> Bool {
+      let cap = Self.window(frame: home, space: "SPACE-BACKGROUND")
+      var m = Restore.Match(
+        reachable: false, minimized: false, liveSpaceCount: 1, liveFrame: liveCapped(dh),
+        currentSpace: "SPACE-BACKGROUND")
+      m.homeUsableHeight = usable
+      return Restore.decide(cap, match: m, tolerance: tolerance) == .skip(.alreadyCorrect)
+    }
+    func carrySaysCappedHome(dh: Int) -> Bool {
+      let cap = Self.window(frame: home, space: "SPACE-BACKGROUND")
+      let binding = Shortcuts.Binding(keyCode: 0, flags: [], isEnabled: true)
+      let shortcuts = Shortcuts(
+        switchToDesktop: Dictionary(uniqueKeysWithValues: (1...10).map { ($0, binding) }),
+        moveLeft: binding, moveRight: binding)
+      return Carry.plan(
+        deferred: [
+          Carry.DeferredWindow(
+            captured: cap, currentGlobalDesktop: 1, liveFrame: liveCapped(dh), usableHeight: usable)
+        ], spaceIndex: index, shortcuts: shortcuts, tolerance: tolerance)[0] == .skip(.alreadyOnDesktop, cap)
+    }
+    #expect(restoreBackgroundSaysHome(dh: drift - 20) == carrySaysCappedHome(dh: drift - 20))  // capped height
   }
 
   /// THE CASE THAT MOTIVATED (a), with the real numbers. Safari's link-preview strip was asked for 340×20,
