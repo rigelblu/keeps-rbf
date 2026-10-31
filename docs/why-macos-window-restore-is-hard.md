@@ -1,6 +1,6 @@
 # Why you can't *silently* restore windows across macOS Spaces
 
-*Findings from building [keeps-rbf](../README.md). Version-pinned: macOS 26 (arm64), SIP **on**,
+*Findings from building [keeps-rbf](../README.md). Version-pinned: macOS 26 (arm64), with a macOS 27.2 (26B123) note on the synthetic drag; SIP **on**,
 "Displays have separate Spaces" on. The load-bearing change landed in macOS Sonoma 14.5 (May 2024).*
 
 ## The itch
@@ -65,6 +65,11 @@ operations, and only one is dead:
   gesture — grab the window's title bar, then fire ⌥⌘N ("Switch to Desktop N"). Works SIP-on via
   Accessibility. But it's **visible** (the screen switches to that desktop), **cursor-hijacking**, one
   window at a time, ~1s each.
+  - **macOS 27.2 counter-result (2026-10-30):** a custom-titlebar window (Claude, Zed, Figma) starts moving
+    only after the drag passes 8px — no move at 8, a move at 10, then 1:1 with the cursor. On a native
+    titlebar (Ghostty), the point just above the close button is not a drag handle at all; the gap between
+    close and minimize, at the button row's middle, is. keeps' fixed 8px proof drag broke on 27, so keeps
+    now drags 2px at a time until the window follows.
 
 I'd assumed (B) was adjacent-only (next/previous Space). It isn't — macOS has direct "Switch to Desktop N"
 shortcuts, so a synthetic drag + ⌥⌘N lands a window on an *arbitrary* desktop. So full virtual-desktop

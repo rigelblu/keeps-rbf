@@ -28,9 +28,8 @@ public enum ConfigIdentity {
         CGGetActiveDisplayList(count, &ids, &count)
         var map: [String: DisplayBounds] = [:]
         for id in ids.prefix(Int(count)) {
-            guard let u = uuid(id) else { continue }
-            let b = CGDisplayBounds(id)
-            map[u] = DisplayBounds(x: Int(b.minX), y: Int(b.minY), w: Int(b.width), h: Int(b.height))
+            guard let u = uuid(id), let bounds = DisplayBounds(CGDisplayBounds(id)) else { continue }
+            map[u] = bounds
         }
         return map
     }
