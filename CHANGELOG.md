@@ -3,7 +3,13 @@ title: Changelog
 ---
 
 # 🔵⋯ [Unreleased]
-(none)
+## 🟠⋯ Fixed
+- 2026-10-31 - the done notification no longer counts a window keeps reached but couldn't see and whose app gave it nothing to reach — such a quiet miss stays out of the verdict (fix count honesty, #keeps-36.1) | a status strip saved as a window no longer turns "3 windows brought back" into "3 of 5" [@keeps-rbf]
+- 2026-10-31 - keeps stops offering a window it failed to find twice in a row with no Accessibility element, until a Restore or offer tap sees it or keeps relaunches; a stopped carry's badge drops the windows that run stopped offering (fix stop offering, #keeps-36.2) | no more desktop trips and "Couldn't bring the window back" for windows you never had [@keeps-rbf]
+- 2026-10-31 - a window the screen caps below its saved height — the Dock's reserved strip — counts as home at the height the screen allows, in Restore, the carry's plan and its frame check (fix capped height, #keeps-36.3) | a window that came home no longer reads "Couldn't bring the window back", and keeps doesn't re-place it every Restore; when the Dock hides, its full height comes back [@keeps-rbf]
+
+## 🟠⋯ Improved
+- 2026-10-31 - the file trace says why: `[carry:summary]`, `[carry:notOffered]`, `[skip:notOffered live=…]`, `[offer:back]`, `[carry:frameMiss]`, and the usable height on the restore and carry headers (#keeps-36) | a surprising verdict is explainable from the trace alone [@keeps-rbf]
 
 # 🔵⋯ v0.9.0 (2026-07-07)
 *A running carry is legible end to end: the menu-bar item animates with live progress while keeps works, and a notification delivers the honest verdict the moment it's done — you never open the menu to find out what happened. — `#keeps-19`*
