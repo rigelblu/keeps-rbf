@@ -25,7 +25,7 @@ public enum Restore {
     case gone  // no live window matches — closed since capture
     case minimized  // matched but minimized / 0-space — can't place; un-minimize is out of scope
     case deferredBackground  // matched, on a BACKGROUND desktop — silent AX can't reach it → #keeps-12
-    case alreadyCorrect  // live frame already matches the captured frame (±tolerance) — no-op
+    case alreadyCorrect  // live frame already matches the captured frame (±tolerance), or that frame capped at the display's usable height — no-op
     // #keeps-17: the Space-safety guard. `deferred*` = the carry owns it now; the other two are count-only.
     case deferredCrossDisplay  // placing would cross displays onto a Space that isn't the window's captured one
     case offScreenTarget  // the desired frame resolves to no live display — placing lands unpredictably (#keeps-15 owns the repair)
@@ -68,6 +68,8 @@ public enum Restore {
     // #keeps-5: does the live window's owning app still match the captured one? Defaults true so every
     // existing test fixture keeps meaning what it meant — this guard adds a rejection, it re-classifies nothing.
     var identityOK: Bool = true
+    // #keeps-36.3: the usable height of the window's saved display, for `isHome`. nil ⇒ no cap (exact match).
+    var homeUsableHeight: Int? = nil
 
     /// A live window exists under this id, but it belongs to someone else. Every other field is deliberately
     /// inert — `decide` rejects on `identityOK` before reading any of them.
@@ -118,7 +120,7 @@ public enum Restore {
       // the offer, and the opposite ordering would defer the identical state. That flicker is the same
       // count-dishonesty this slice exists to remove. One Space is the only reading that actually proves home.
       if !cap.sticky, m.liveSpaceCount == 1, let lf = m.liveFrame,
-        cap.frame.matches(lf, tolerance: tolerance),
+        cap.frame.isHome(lf, tolerance: tolerance, usableHeight: m.homeUsableHeight),
         let home = cap.spaceUUID, m.currentSpace == home
       {
         return .skip(.alreadyCorrect)
@@ -133,7 +135,7 @@ public enum Restore {
     let spaceOK =
       cap.sticky || cap.spaceUUID == nil || m.currentSpace == nil
       || m.currentSpace == cap.spaceUUID
-    if let lf = m.liveFrame, cap.frame.matches(lf, tolerance: tolerance) {
+    if let lf = m.liveFrame, cap.frame.isHome(lf, tolerance: tolerance, usableHeight: m.homeUsableHeight) {
       return spaceOK ? .skip(.alreadyCorrect) : .skip(.deferredWrongSpace)
     }
     if !spaceOK {
@@ -169,6 +171,12 @@ public enum Restore {
     let existence: Existence
     let desktopIndex: DesktopIndex  // #keeps-17: managedID→uuid for verify-after-place
     let topology: Topology  // #keeps-17: the guard's landing-display + active-Space facts
+    /// #keeps-36.3: display UUID → usable height, read by the caller on the main thread (`usableHeights()`).
+    var usableHeights: [String: Int] = [:]
+
+    /// The usable height of the window's saved display — the cap `WindowFrame.isHome` judges against, for
+    /// restore and the carry alike. nil ⇒ unknown display ⇒ no cap.
+    func usableHeight(for cap: CapturedWindow) -> Int? { cap.displayUUID.flatMap { usableHeights[$0] } }
   }
 
   /// The live display topology the #keeps-17 guard classifies against: each display's bounds (which display
@@ -217,18 +225,46 @@ public enum Restore {
       }
       return Topology(displays: displays)
     }
+
+    /// #keeps-36.3: each screen's usable height (`NSScreen.visibleFrame`, rounded down) by display UUID. It
+    /// reads `NSScreen`, so it runs on the main thread, once per run, and the run takes the map as a parameter —
+    /// never a hop to the main actor from inside a run, which would deadlock the CLI's blocked main thread.
+    static func usableHeights() -> [String: Int] {
+      dispatchPrecondition(condition: .onQueue(.main))
+      var map: [String: Int] = [:]
+      for screen in NSScreen.screens {
+        guard
+          let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+          let uuid = ConfigIdentity.uuid(CGDirectDisplayID(n.uint32Value))
+        else { continue }
+        map[uuid] = Int(screen.visibleFrame.height.rounded(.down))
+      }
+      return map
+    }
+
+    /// The trace headers' ` — usable <first 8 of the UUID>=<height>` note; empty when nothing was read.
+    static func usableNote(_ map: [String: Int]) -> String {
+      map.isEmpty
+        ? ""
+        : " — usable " + map.sorted { $0.key < $1.key }.map { "\($0.key.prefix(8))=\($0.value)" }
+          .joined(separator: ", ")
+    }
   }
+
+  /// #keeps-36.3: the host's door to `Topology.usableHeights()` — call it on the main thread and pass the map to
+  /// `restore` and `Carry.carry`.
+  public static func usableHeights() -> [String: Int] { Topology.usableHeights() }
 
   /// Read the live window state `decide` classifies against. One AX sweep + one CGWindowList read + one
   /// topology read; `nil` on a failed SkyLight load (cid == 0) so callers can surface `readFailed` instead
   /// of acting on nothing (M4).
-  static func gatherLiveState() -> LiveState? {
+  static func gatherLiveState(usableHeights: [String: Int] = [:]) -> LiveState? {
     let cid = cgsMainConnection()
     guard cid != 0 else { return nil }
     let index = DesktopIndex.live(cid)
     return LiveState(
       cid: cid, reachable: reachableWindows(), existence: enumerateExistence(),
-      desktopIndex: index, topology: Topology.live(index: index))
+      desktopIndex: index, topology: Topology.live(index: index), usableHeights: usableHeights)
   }
 
   /// Classify every captured window against live state — each paired with its `Action`. The seam #keeps-12's
@@ -428,9 +464,10 @@ public enum Restore {
   /// is withheld from the offer unless this run reads it on screen or finds it in AX (`Result.seenReal`).
   public static func restore(
     _ snapshot: Snapshot, apply: Bool, tolerance: Int = Restore.frameTolerance,
-    tracked: Set<CGWindowID> = [], notOffered: Set<CGWindowID> = []
+    tracked: Set<CGWindowID> = [], notOffered: Set<CGWindowID> = [],
+    usableHeights: [String: Int] = [:]
   ) -> Result {
-    guard let live = gatherLiveState() else {  // SkyLight load failed → act on nothing (M4)
+    guard let live = gatherLiveState(usableHeights: usableHeights) else {  // SkyLight load failed → act on nothing (M4)
       return Result(
         planned: 0, applied: 0, failures: 0, skips: [:], outcomes: [], dryRun: !apply,
         readFailed: true)
@@ -479,7 +516,7 @@ public enum Restore {
     if DebugTrace.enabled {
       DebugTrace.log(
         "=== restore fp=\(snapshot.configFingerprint) apply=\(apply)\(DebugTrace.focusNote) — displays: "
-          + DebugTrace.displaysHeader(dbg))
+          + DebugTrace.displaysHeader(dbg) + Topology.usableNote(usableHeights))
     }
     let seenReal = CarryMissTally.seenReal(
       tracked: tracked, reachable: Set(live.reachable.keys), onScreen: live.existence.onScreen)
@@ -718,7 +755,8 @@ public enum Restore {
         currentDisplay: current?.uuid,
         landingDisplay: landing?.uuid,
         landingActiveSpace: landing?.activeSpaceUUID,
-        currentSpace: ownSpace)
+        currentSpace: ownSpace,
+        homeUsableHeight: live.usableHeight(for: cap))
     }
     guard live.existence.ids.contains(wid) else { return nil }  // not in .optionAll at all ⇒ gone
     // #keeps-5 guard site 2 of 2 — the one the brief's first draft argued was harmless. It is not: an
@@ -734,7 +772,8 @@ public enum Restore {
       reachable: false, minimized: false,  // not-in-AX minimized is caught by the 0-space check
       liveSpaceCount: spaces.count,
       liveFrame: live.existence.frames[wid],  // #keeps-17 guard facts stay nil — the guard sits on the place path
-      currentSpace: spaces.first.flatMap { live.desktopIndex.uuid(ofManagedID: $0) })  // #keeps-15 slice 2
+      currentSpace: spaces.first.flatMap { live.desktopIndex.uuid(ofManagedID: $0) },  // #keeps-15 slice 2
+      homeUsableHeight: live.usableHeight(for: cap))  // #keeps-36.3
   }
 
   /// AX size→pos→size — defeats apps that move-on-resize and constraints that drop a lone trailing size-set
@@ -790,6 +829,19 @@ extension WindowFrame {
   func matches(_ other: WindowFrame, tolerance: Int) -> Bool {
     samePosition(other, tolerance: tolerance) && sameSize(other, tolerance: tolerance)
   }
+
+  /// #keeps-36.3: "home" judged against the height the screen allows. The saved frame always counts; while the
+  /// usable height is below the saved one (the Dock's reserve, 2026-10-31), so does the saved frame with its
+  /// height capped there. Position and width stay exact. `nil` ⇒ `matches` alone. Not for pairing:
+  /// `ColdStartMatch` asks "is this the same window", not "is it home", and keeps `matches`.
+  func isHome(_ live: WindowFrame, tolerance: Int, usableHeight: Int?) -> Bool {
+    if matches(live, tolerance: tolerance) { return true }
+    guard let usableHeight, usableHeight < h else { return false }
+    return homeTarget(usableHeight: usableHeight).matches(live, tolerance: tolerance)
+  }
+
+  /// This frame with its height capped at `usableHeight`; position and width unchanged.
+  func homeTarget(usableHeight: Int) -> WindowFrame { WindowFrame(x: x, y: y, w: w, h: usableHeight) }
 
   /// Same origin within ±tolerance, whatever the size — `ColdStartMatch`'s tier 2 (#keeps-31): a strip whose
   /// width tracks its content, or a window resized in place. Not on its own a proof of "home".

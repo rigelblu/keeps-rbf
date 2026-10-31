@@ -31,6 +31,53 @@ import Testing
       landingActiveSpace: landingActiveSpace, currentSpace: currentSpace)
   }
 
+  // MARK: #keeps-36.3 — home is judged against the height the screen allows
+
+  private let saved = WindowFrame(x: 0, y: 39, w: 1200, h: 1130)  // Safari 3777's saved frame
+  private func live(w: Int = 1200, h: Int) -> WindowFrame { WindowFrame(x: 0, y: 39, w: w, h: h) }
+
+  @Test func isHomeAcceptsTheUsableHeightOrTheSavedFrame() {
+    let t = Restore.frameTolerance
+    #expect(saved.isHome(live(h: 1047), tolerance: t, usableHeight: 1048))
+    #expect(saved.isHome(live(h: 1130), tolerance: t, usableHeight: 1048))  // the exact saved frame always counts
+    #expect(!saved.isHome(live(h: 900), tolerance: t, usableHeight: 1048))
+    #expect(!saved.isHome(live(w: 1190, h: 1047), tolerance: t, usableHeight: 1048))  // width stays exact
+  }
+
+  @Test func isHomeIsAnExactMatchWhenNothingCaps() {
+    let t = Restore.frameTolerance
+    for usable in [nil, 1130, 1200] as [Int?] {
+      #expect(!saved.isHome(live(h: 1047), tolerance: t, usableHeight: usable))
+      #expect(saved.isHome(live(h: 1130), tolerance: t, usableHeight: usable))
+    }
+  }
+
+  @Test func homeTargetCapsOnlyTheHeight() {
+    #expect(saved.homeTarget(usableHeight: 1048) == WindowFrame(x: 0, y: 39, w: 1200, h: 1048))
+  }
+
+  /// The cap only ever lowers the bar: a usable height above the saved one never makes a taller window home.
+  @Test func aUsableHeightAboveTheSavedOneNeverStretchesHome() {
+    let short = WindowFrame(x: 0, y: 39, w: 1200, h: 600)
+    #expect(!short.isHome(live(h: 1200), tolerance: Restore.frameTolerance, usableHeight: 1200))
+  }
+
+  @Test func decideReachableCountsACappedWindowAsHome() {
+    var m = match(liveFrame: live(h: 1047), currentSpace: "S")
+    m.homeUsableHeight = 1048
+    #expect(Restore.decide(cap(frame: saved), match: m) == .skip(.alreadyCorrect))
+    m.homeUsableHeight = nil
+    #expect(Restore.decide(cap(frame: saved), match: m) == .place(saved, verifySpace: false))
+  }
+
+  @Test func decideBackgroundCountsACappedWindowAsHome() {
+    var m = match(reachable: false, spaceCount: 1, liveFrame: live(h: 1047), currentSpace: "S")
+    m.homeUsableHeight = 1048
+    #expect(Restore.decide(cap(frame: saved), match: m) == .skip(.alreadyCorrect))
+    m.homeUsableHeight = nil
+    #expect(Restore.decide(cap(frame: saved), match: m) == .skip(.deferredBackground))
+  }
+
   @Test func placesReachableWindowOffSpot() {
     let m = match(liveFrame: WindowFrame(x: 0, y: 0, w: 800, h: 600))  // current ≠ captured → move
     #expect(Restore.decide(cap(), match: m) == .place(cap().frame, verifySpace: false))

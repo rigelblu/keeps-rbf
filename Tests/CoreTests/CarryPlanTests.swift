@@ -2,6 +2,7 @@
 // one of carry / alreadyOnDesktop / targetGone / unreachableShortcut / gone, so a wrong-desktop carry can't slip
 // through and no window goes unaccounted. The pure plan computes the TARGET (captured spaceUUID → live global);
 // the held-window-follows mechanism is verified live by Tom's one-window #keeps-12 matrix, not here.
+import CoreGraphics
 import Testing
 
 @testable import Core
@@ -164,6 +165,42 @@ import Testing
     let home = Carry.skipOutcome(.alreadyOnDesktop, cap: w5649, from: 1, to: 1)
     #expect(home.evidence == nil)
     #expect(home.onScreenCheck == nil)
+  }
+
+  // #keeps-36.3: home is judged against the height the screen allows. Safari 3777, 2026-10-31: saved 1200×1130,
+  // the Dock left a usable height of 1048, and every write landed 1200×1047.
+  private let wanted3777 = WindowFrame(x: 0, y: 39, w: 1200, h: 1130)
+  private let saw3777 = WindowFrame(x: 0, y: 39, w: 1200, h: 1047)
+
+  @Test func planCountsACappedWindowOnItsDesktopAsHome() {
+    let safari = CapturedWindow(
+      bundleId: "com.apple.Safari", pid: 1, title: nil, cgWindowId: 3777, displayUUID: "DISP-0",
+      desktopOrdinal: 1, spaceUUID: "d0s0", frame: wanted3777, spaceIds: [1], sticky: false, onScreen: false)
+    func plan(usable: Int?) -> Carry.CarryAction {
+      Carry.plan(
+        deferred: [
+          Carry.DeferredWindow(
+            captured: safari, currentGlobalDesktop: 1, liveFrame: saw3777, usableHeight: usable)
+        ], spaceIndex: index(), shortcuts: navAll())[0]
+    }
+    #expect(plan(usable: 1048) == .skip(.alreadyOnDesktop, safari))
+    #expect(plan(usable: nil) == .placeOnly(safari, onGlobal: 1))
+  }
+
+  @Test func frameMissLineSaysWhatItSaw() {
+    let safari = CapturedWindow(
+      bundleId: "com.apple.Safari", pid: 1, title: nil, cgWindowId: 3777, displayUUID: "DISP-0",
+      desktopOrdinal: 1, spaceUUID: "d0s0", frame: wanted3777, spaceIds: [1], sticky: false, onScreen: false)
+    let head = "[carry:frameMiss] com.apple.Safari wid=3777 \"\" — "
+    #expect(
+      Carry.frameMissLine(cap: safari, seen: saw3777, usable: 1048)
+        == head + "saw 1200×1047 at (0,39), wanted 1200×1130 at (0,39), usable 1048")
+    #expect(
+      Carry.frameMissLine(cap: safari, seen: nil, usable: 1048)
+        == head + "saw nothing on screen, wanted 1200×1130 at (0,39), usable 1048")
+    #expect(
+      Carry.frameMissLine(cap: safari, seen: saw3777, usable: nil)
+        == head + "saw 1200×1047 at (0,39), wanted 1200×1130 at (0,39), usable ?")
   }
 
   @Test func skipsUnreachableWhenTargetNeedsUnboundShortcut() {  // global 17 needs stepping; jumpsOnly has none

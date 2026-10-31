@@ -169,7 +169,9 @@ A verdict leaves out a window keeps reached but couldn't find on screen, and who
 element; `[carry:summary]` says how many. After two such misses in a row keeps stops offering that window until a
 Restore or an offer tap finds it on screen or finds its Accessibility element, or keeps relaunches — for a window
 on another desktop, usually the relaunch. `[carry:notOffered]`, `[skip:notOffered]` and `[offer:back]` say which
-and why: `grep -E 'notOffered|offer:back|carry:summary' ~/Library/Logs/keeps-debug.log`.
+and why. A window the screen won't let reach its saved height (the Dock's reserve) counts as home at the usable
+height; when a carried window's frame doesn't hold, `[carry:frameMiss]` says what keeps saw, what it wanted and
+the usable height: `grep -E 'notOffered|offer:back|carry:summary|frameMiss' ~/Library/Logs/keeps-debug.log`.
 
 Snapshots are written one-per-setup to `~/Library/Application Support/com.rigelblu.keeps/configs/`.
 Capture needs no special permission; window *titles* require Screen Recording (optional). **Restore**
