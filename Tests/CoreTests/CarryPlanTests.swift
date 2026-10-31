@@ -122,10 +122,11 @@ import Testing
   // #keeps-30: the post-navigation "not on screen" verdict carries its raise evidence onto the FILE trace line.
   // Only `Outcome` reaches `DebugTrace`; the sites' `log.info` lines are os_log and roll in minutes.
   @Test func evidenceOnTraceLine() {
+    // #keeps-36: the evidence is derived from the leg's on-screen tag, never hand-set on an executed leg.
     let o = Carry.Outcome(cap: cap("d0s4"), fromGlobal: 3, toGlobal: 1, outcome: "notOnScreen",
-                          evidence: Carry.Outcome.raiseEvidence(false))
+                          onScreenCheck: .missedNoElement)
     #expect(o.traceLine == "[carry:notOnScreen] com.example.app wid=1 \"t\" — desktop 3→1 — raise=noAXElement")
-    let plain = Carry.Outcome(cap: cap("d0s4"), fromGlobal: 3, toGlobal: 1, outcome: "carried")
+    let plain = Carry.Outcome(cap: cap("d0s4"), fromGlobal: 3, toGlobal: 1, outcome: "carried", onScreenCheck: nil)
     #expect(plain.traceLine == "[carry:carried] com.example.app wid=1 \"t\" — desktop 3→1")
     #expect(Carry.Outcome.raiseEvidence(true) == "raise=ok")
   }

@@ -85,4 +85,41 @@ import Testing
       CarrySignifier.verdictBody(carried: 0, planned: 0, aborted: false)
         == "Everything was already in place")
   }
+
+  // MARK: Verdict count — #keeps-36.1: a window keeps reached but couldn't find, with no AX element, is left out
+
+  private func result(carried: Int, planned: Int, quiet: Int, aborted: Bool = false) -> Carry.CarryResult {
+    let cap = CapturedWindow(
+      bundleId: "com.google.Chrome.beta", pid: 1, title: nil, cgWindowId: 5649,
+      displayUUID: "DISP-0", desktopOrdinal: 1, spaceUUID: "s1",
+      frame: WindowFrame(x: 0, y: 0, w: 400, h: 80), spaceIds: [1], sticky: false, onScreen: false)
+    let misses = (0..<quiet).map { _ in
+      Carry.Outcome(cap: cap, fromGlobal: 6, toGlobal: 1, outcome: "notOnScreen", onScreenCheck: .missedNoElement)
+    }
+    return Carry.CarryResult(
+      plannedCarries: planned, carried: carried, skips: [.notOnScreen: quiet], aborted: aborted,
+      abortedAfter: aborted ? carried : 0, outcomes: misses, dryRun: false, readFailed: false,
+      navigationDead: false)
+  }
+
+  private func verdict(_ r: Carry.CarryResult) -> String {
+    CarrySignifier.verdictBody(carried: r.carried, planned: r.verdictPlanned, aborted: r.aborted)
+  }
+
+  @Test func verdictLeavesQuietMissesOut() {
+    let h1 = result(carried: 3, planned: 5, quiet: 2)  // H1's 2026-10-30 22:36 run: "3 of 5" before
+    #expect(h1.verdictPlanned == 3)
+    #expect(verdict(h1) == "3 windows brought back")
+    #expect(verdict(result(carried: 1, planned: 3, quiet: 2)) == "1 window brought back")
+  }
+
+  @Test func allQuietRunReadsEverythingInPlace() {
+    #expect(verdict(result(carried: 0, planned: 1, quiet: 1)) == "Everything was already in place")
+  }
+
+  @Test func stoppedRunCountsWithoutQuietMisses() {  // the 23:38 run
+    #expect(
+      verdict(result(carried: 0, planned: 2, quiet: 1, aborted: true))
+        == "Stopped — 0 of 1 window brought back")
+  }
 }

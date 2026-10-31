@@ -346,6 +346,13 @@ public enum Carry {
 
     // MARK: - I/O sweep result
 
+    /// #keeps-36: what a leg learned at the post-navigation on-screen check. `missedNoElement` is the quiet miss —
+    /// on its desktop, not on screen, and its app gave no AX element (`notOnScreen(raised: false)`): the shape of
+    /// app chrome keeps can't act on, and the only tag the verdict leaves out.
+    public enum OnScreenCheck: Equatable, Sendable {
+        case found, missedWithElement, missedNoElement
+    }
+
     public struct Outcome: Sendable {
         public let bundleId: String
         public let title: String?
@@ -353,14 +360,26 @@ public enum Carry {
         public let fromGlobal: Int?
         public let toGlobal: Int?
         public let outcome: String     // "would-carry" | "carried" | "aborted" | a CarrySkip rawValue
+        /// #keeps-36: `nil` when the leg never reached the on-screen check — a plan skip, a dry run, a leg stopped
+        /// before it ran. A required `init` argument with no default, for the reason `CarryOutcome` gives for
+        /// `.notOnScreen(raised:)`: a site that forgets it must not compile.
+        public let onScreenCheck: OnScreenCheck?
         // #keeps-30: what the failing site saw, when the word alone can't say — `raise=noAXElement` / `raise=ok`
         // for `notOnScreen`. It rides here because only `Outcome` reaches the FILE trace (`traceLine` below);
-        // the `log.info` lines at the sites are os_log, which rolls in minutes.
+        // the `log.info` lines at the sites are os_log, which rolls in minutes. #keeps-36: on an executed leg it
+        // is derived from `onScreenCheck`, so the tag and the trace can't disagree; a hand-set `evidence:` is
+        // for skip legs only, which carry no tag.
         public let evidence: String?
-        init(cap: CapturedWindow, fromGlobal: Int?, toGlobal: Int?, outcome: String, evidence: String? = nil) {
+        init(cap: CapturedWindow, fromGlobal: Int?, toGlobal: Int?, outcome: String,
+             onScreenCheck: OnScreenCheck?, evidence: String? = nil) {
             bundleId = cap.bundleId; title = cap.title; cgWindowId = cap.cgWindowId
             self.fromGlobal = fromGlobal; self.toGlobal = toGlobal; self.outcome = outcome
-            self.evidence = evidence
+            self.onScreenCheck = onScreenCheck
+            switch onScreenCheck {
+            case .missedNoElement: self.evidence = Outcome.raiseEvidence(false)
+            case .missedWithElement: self.evidence = Outcome.raiseEvidence(true)
+            case .found, nil: self.evidence = evidence
+            }
         }
         static func raiseEvidence(_ raised: Bool) -> String { raised ? "raise=ok" : "raise=noAXElement" }
         /// The `[carry:…]` line the file trace writes for this outcome — pure, so a test can pin the render.
@@ -393,6 +412,10 @@ public enum Carry {
         // its own gate rather than inheriting one. Same shape as readFailed/navigationDead: an honest stop.
         public var staleSession: Bool = false
         public var skipped: Int { skips.values.reduce(0, +) }
+        /// #keeps-36.1: legs that reached the window's desktop and found it neither on screen nor in AX.
+        public var quietMisses: Int { outcomes.filter { $0.onScreenCheck == .missedNoElement }.count }
+        /// The `planned` the verdict banner states: quiet misses are neither "brought back" nor "couldn't".
+        public var verdictPlanned: Int { plannedCarries - quietMisses }
     }
 
     // MARK: - I/O sweep
@@ -477,7 +500,7 @@ public enum Carry {
                 // Surface the desktops even for skips: current (from) is known, target (to) resolves from the
                 // captured spaceUUID — so a verbose line reads `desktop 5→5 (alreadyOnDesktop)`, not `?→?`.
                 let to = cap.spaceUUID.flatMap { index.globalOrdinal(ofSpaceUUID: $0) }
-                outcomes.append(Outcome(cap: cap, fromGlobal: dw.currentGlobalDesktop, toGlobal: to, outcome: reason.rawValue))
+                outcomes.append(Outcome(cap: cap, fromGlobal: dw.currentGlobalDesktop, toGlobal: to, outcome: reason.rawValue, onScreenCheck: nil))
             case .placeOnly(let cap, let on):
                 // #keeps-22: same shape as a carry (progress, dry-run, interrupt boundary) minus the Space
                 // move. Counts as carried — from the user's side the window did come home; only the drift
@@ -486,57 +509,62 @@ public enum Carry {
                 onProgress(Progress(done: done, total: total, toDesktop: on, bundleId: cap.bundleId))
                 guard apply, !aborted else {
                     outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on,
-                                            outcome: apply ? "skipped (aborted)" : "would-place"))
+                                            outcome: apply ? "skipped (aborted)" : "would-place", onScreenCheck: nil))
                     continue
                 }
                 if userMoved() {
                     aborted = true; abortedAfter = carried
                     skips[.userInterrupt, default: 0] += 1
                     outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on,
-                                            outcome: CarrySkip.userInterrupt.rawValue))
+                                            outcome: CarrySkip.userInterrupt.rawValue, onScreenCheck: nil))
                     continue
                 }
                 switch await executePlaceOnly(cap, onGlobal: on, index: index, shortcuts: shortcuts, cid: cid) {
                 case .carried:
                     carried += 1
-                    outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on, outcome: "placed"))
+                    outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on, outcome: "placed", onScreenCheck: nil))
                 case .failed(let reason), .aborted(let reason):
                     skips[reason, default: 0] += 1
-                    outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on, outcome: reason.rawValue))
+                    outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on, outcome: reason.rawValue,
+                                            onScreenCheck: nil))
                 case .notOnScreen(let raised):
                     skips[.notOnScreen, default: 0] += 1
                     outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on,
-                                            outcome: CarrySkip.notOnScreen.rawValue, evidence: Outcome.raiseEvidence(raised)))
+                                            outcome: CarrySkip.notOnScreen.rawValue,
+                                            onScreenCheck: raised ? .missedWithElement : .missedNoElement))
                 }
             case .carry(let cap, let from, let to):
                 done += 1
                 onProgress(Progress(done: done, total: total, toDesktop: to, bundleId: cap.bundleId))
                 guard apply, !aborted else {   // dry run lists the plan; after an abort the rest are left untouched
                     outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to,
-                                            outcome: apply ? "skipped (aborted)" : "would-carry"))
+                                            outcome: apply ? "skipped (aborted)" : "would-carry", onScreenCheck: nil))
                     continue
                 }
                 if userMoved() {   // #keeps-17 Q3: between-windows boundary sample — real input halts the run
                     aborted = true; abortedAfter = carried
                     skips[.userInterrupt, default: 0] += 1
                     outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to,
-                                            outcome: CarrySkip.userInterrupt.rawValue))
+                                            outcome: CarrySkip.userInterrupt.rawValue, onScreenCheck: nil))
                     continue
                 }
                 switch await executeCarry(cap, fromGlobal: from, toGlobal: to, index: index, shortcuts: shortcuts, cid: cid) {
                 case .carried:
-                    carried += 1; outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to, outcome: "carried"))
+                    carried += 1; outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to, outcome: "carried", onScreenCheck: nil))
                 case .failed(let reason):
                     skips[reason, default: 0] += 1
-                    outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to, outcome: reason.rawValue))
+                    outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to, outcome: reason.rawValue,
+                                            onScreenCheck: nil))
                 case .notOnScreen(let raised):
                     skips[.notOnScreen, default: 0] += 1
                     outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to,
-                                            outcome: CarrySkip.notOnScreen.rawValue, evidence: Outcome.raiseEvidence(raised)))
+                                            outcome: CarrySkip.notOnScreen.rawValue,
+                                            onScreenCheck: raised ? .missedWithElement : .missedNoElement))
                 case .aborted(let reason):
                     skips[reason, default: 0] += 1
                     aborted = true; abortedAfter = carried
-                    outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to, outcome: reason.rawValue))
+                    outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to, outcome: reason.rawValue,
+                                            onScreenCheck: nil))
                 }
             }
         }
