@@ -28,4 +28,11 @@ public enum CarryAffordance {
   public static func afterRestore(fingerprint: String, deferred: Int) -> PendingCarry? {
     deferred > 0 ? PendingCarry(fingerprint: fingerprint, count: deferred) : nil
   }
+
+  /// #keeps-36.2: a stopped carry keeps its offer so the user can resume, but not for the windows that run just
+  /// stopped offering — they won't be planned again. `nil` once nothing is left.
+  public static func afterStoppedRun(_ pending: PendingCarry?, newlyStopped: Int) -> PendingCarry? {
+    guard let pending else { return nil }
+    return afterRestore(fingerprint: pending.fingerprint, deferred: pending.count - newlyStopped)
+  }
 }

@@ -79,6 +79,9 @@ public enum Carry {
         // used to be reported as success (Safari's status bar, 2026-07-28 dogfood: `340x20` asked, `151x20` held).
         case frameNotHeld
         case userInterrupt         // physical mouse movement interrupted the run
+        // #keeps-36.2: the menu-bar app stopped offering it — twice in a row keeps reached its desktop and found it
+        // neither on screen nor in AX (`CarryMissTally`). No trip; the trace line says why.
+        case notOffered
     }
 
     public enum CarryAction: Equatable {
@@ -310,10 +313,13 @@ public enum Carry {
     /// It now literally IS that default (`Restore.frameTolerance`) rather than a matching magic number kept
     /// in step by this comment: the cold review pointed out that a warning about drift, guarded only by
     /// convention, is not a guard.
+    /// #keeps-36.2: `notOffered` (live ids) is checked first — a window keeps stopped offering makes no trip at all.
     public static func plan(deferred: [DeferredWindow], spaceIndex: DesktopIndex, shortcuts: Shortcuts,
-                            tolerance: Int = Restore.frameTolerance) -> [CarryAction] {
+                            tolerance: Int = Restore.frameTolerance,
+                            notOffered: Set<CGWindowID> = []) -> [CarryAction] {
         deferred.map { dw in
             let cap = dw.captured
+            if notOffered.contains(cap.cgWindowId) { return .skip(.notOffered, cap) }
             if cap.sticky || cap.spaceIds.count != 1 { return .skip(.stickyAllDesktops, cap) }
             guard let uuid = cap.spaceUUID, let to = spaceIndex.globalOrdinal(ofSpaceUUID: uuid) else {
                 return .skip(.targetGone, cap)        // captured desktop no longer exists
@@ -344,7 +350,13 @@ public enum Carry {
         shortcuts.canStep || shortcuts.switchTo(global) != nil
     }
 
-    // MARK: - I/O sweep result
+    /// The sweep's `Outcome` for a plan skip — pure, so a test of it is a test of the sweep's line. Only
+    /// `.notOffered` carries evidence: the reason keeps stopped offering the window.
+    static func skipOutcome(_ reason: CarrySkip, cap: CapturedWindow, from: Int?, to: Int?) -> Outcome {
+        Outcome(cap: cap, fromGlobal: from, toGlobal: to, outcome: reason.rawValue, onScreenCheck: nil,
+                evidence: reason == .notOffered
+                    ? "\(CarryMissTally.stopAfter) misses in a row, raise=noAXElement" : nil)
+    }
 
     /// #keeps-36: what a leg learned at the post-navigation on-screen check. `missedNoElement` is the quiet miss —
     /// on its desktop, not on screen, and its app gave no AX element (`notOnScreen(raised: false)`): the shape of
@@ -352,6 +364,27 @@ public enum Carry {
     public enum OnScreenCheck: Equatable, Sendable {
         case found, missedWithElement, missedNoElement
     }
+
+    /// #keeps-36.2: what the first half of a leg learned — everything up to and including the on-screen check.
+    /// The place-only and carry legs are each split there (`reachForPlace`/`placeFound`,
+    /// `reachForCarry`/`carryFound`), and the second halves take only a `.found` bounds, so every exit after the
+    /// check — aborted or failed included — is tagged `found` by construction.
+    enum Reach {
+        case notReached(CarrySkip)    // navigation failed before the check
+        case missed(raised: Bool)     // on its desktop, not on screen; `raised` = AX found an element
+        case found(CGRect)            // on screen, with its bounds
+    }
+
+    /// The one place a `Reach` becomes a leg's tag.
+    static func onScreenCheck(_ reach: Reach) -> OnScreenCheck? {
+        switch reach {
+        case .notReached: return nil
+        case .missed(let raised): return raised ? .missedWithElement : .missedNoElement
+        case .found: return .found
+        }
+    }
+
+    // MARK: - I/O sweep result
 
     public struct Outcome: Sendable {
         public let bundleId: String
@@ -376,8 +409,12 @@ public enum Carry {
             self.fromGlobal = fromGlobal; self.toGlobal = toGlobal; self.outcome = outcome
             self.onScreenCheck = onScreenCheck
             switch onScreenCheck {
-            case .missedNoElement: self.evidence = Outcome.raiseEvidence(false)
-            case .missedWithElement: self.evidence = Outcome.raiseEvidence(true)
+            case .missedNoElement:
+                assert(evidence == nil, "a miss tag derives its own evidence — hand-set evidence is for skips")
+                self.evidence = Outcome.raiseEvidence(false)
+            case .missedWithElement:
+                assert(evidence == nil, "a miss tag derives its own evidence — hand-set evidence is for skips")
+                self.evidence = Outcome.raiseEvidence(true)
             case .found, nil: self.evidence = evidence
             }
         }
@@ -416,6 +453,15 @@ public enum Carry {
         public var quietMisses: Int { outcomes.filter { $0.onScreenCheck == .missedNoElement }.count }
         /// The `planned` the verdict banner states: quiet misses are neither "brought back" nor "couldn't".
         public var verdictPlanned: Int { plannedCarries - quietMisses }
+        /// #keeps-36.2: tracked ids this run read on screen or found in AX — the host clears them from its tally.
+        public var seenReal: Set<CGWindowID> = []
+        /// The file trace's one line per applied carry, after its per-window lines.
+        public var summaryTraceLine: String {
+            "[carry:summary] carried \(carried) of \(plannedCarries) planned — "
+                + (quietMisses == 0
+                    ? "0 left out"
+                    : "\(quietMisses) left out of the verdict (not on screen, raise=noAXElement)")
+        }
     }
 
     // MARK: - I/O sweep
@@ -423,7 +469,11 @@ public enum Carry {
     /// Carry the snapshot's deferred-background windows home. `apply == false` is a DRY RUN — it re-classifies,
     /// plans, and lists per-window targets but moves nothing (the safe default; note this validates the PLAN, not
     /// the mechanism — whether a held window follows is only provable live). `onProgress` streams `Carrying k/N`.
+    ///
+    /// #keeps-36.2: `tracked` and `notOffered` are the host's `CarryMissTally` sets (live ids). A tracked window this
+    /// run reads on screen or finds in AX is real: it's offered again and returned in `seenReal`.
     public static func carry(_ snapshot: Snapshot, apply: Bool,
+                             tracked: Set<CGWindowID> = [], notOffered: Set<CGWindowID> = [],
                              onProgress: (Progress) -> Void = { _ in }) async -> CarryResult {
         guard let live = Restore.gatherLiveState() else {   // SkyLight load failed → act on nothing (M4)
             return CarryResult(plannedCarries: 0, carried: 0, skips: [:], aborted: false, abortedAfter: 0,
@@ -480,7 +530,10 @@ public enum Carry {
                                   currentGlobalDesktop: currentMid.flatMap { index.globalOrdinal(ofManagedID: $0) },
                                   liveFrame: live.existence.frames[cap.cgWindowId])  // #keeps-22
         }
-        let actions = plan(deferred: deferred, spaceIndex: index, shortcuts: shortcuts)
+        let seenReal = CarryMissTally.seenReal(
+            tracked: tracked, reachable: Set(live.reachable.keys), onScreen: live.existence.onScreen)
+        let actions = plan(deferred: deferred, spaceIndex: index, shortcuts: shortcuts,
+                           notOffered: notOffered.subtracting(seenReal))
         let total = actions.reduce(0) {   // #keeps-22: a place is work too — it counts toward progress
             switch $1 { case .carry, .placeOnly: return $0 + 1; case .skip: return $0 }
         }
@@ -500,7 +553,7 @@ public enum Carry {
                 // Surface the desktops even for skips: current (from) is known, target (to) resolves from the
                 // captured spaceUUID — so a verbose line reads `desktop 5→5 (alreadyOnDesktop)`, not `?→?`.
                 let to = cap.spaceUUID.flatMap { index.globalOrdinal(ofSpaceUUID: $0) }
-                outcomes.append(Outcome(cap: cap, fromGlobal: dw.currentGlobalDesktop, toGlobal: to, outcome: reason.rawValue, onScreenCheck: nil))
+                outcomes.append(skipOutcome(reason, cap: cap, from: dw.currentGlobalDesktop, to: to))
             case .placeOnly(let cap, let on):
                 // #keeps-22: same shape as a carry (progress, dry-run, interrupt boundary) minus the Space
                 // move. Counts as carried — from the user's side the window did come home; only the drift
@@ -519,19 +572,23 @@ public enum Carry {
                                             outcome: CarrySkip.userInterrupt.rawValue, onScreenCheck: nil))
                     continue
                 }
-                switch await executePlaceOnly(cap, onGlobal: on, index: index, shortcuts: shortcuts, cid: cid) {
+                let reach = await reachForPlace(cap, onGlobal: on, index: index, shortcuts: shortcuts, cid: cid)
+                let check = onScreenCheck(reach)
+                switch await join(reach, found: { b in
+                    await placeFound(cap, onGlobal: on, preBounds: b, index: index, cid: cid)
+                }) {
                 case .carried:
                     carried += 1
-                    outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on, outcome: "placed", onScreenCheck: nil))
+                    outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on, outcome: "placed",
+                                            onScreenCheck: check))
                 case .failed(let reason), .aborted(let reason):
                     skips[reason, default: 0] += 1
                     outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on, outcome: reason.rawValue,
-                                            onScreenCheck: nil))
-                case .notOnScreen(let raised):
+                                            onScreenCheck: check))
+                case .notOnScreen:
                     skips[.notOnScreen, default: 0] += 1
                     outcomes.append(Outcome(cap: cap, fromGlobal: on, toGlobal: on,
-                                            outcome: CarrySkip.notOnScreen.rawValue,
-                                            onScreenCheck: raised ? .missedWithElement : .missedNoElement))
+                                            outcome: CarrySkip.notOnScreen.rawValue, onScreenCheck: check))
                 }
             case .carry(let cap, let from, let to):
                 done += 1
@@ -548,23 +605,30 @@ public enum Carry {
                                             outcome: CarrySkip.userInterrupt.rawValue, onScreenCheck: nil))
                     continue
                 }
-                switch await executeCarry(cap, fromGlobal: from, toGlobal: to, index: index, shortcuts: shortcuts, cid: cid) {
+                let reach = await reachForCarry(cap, fromGlobal: from, toGlobal: to, index: index,
+                                              shortcuts: shortcuts, cid: cid)
+                let check = onScreenCheck(reach)
+                switch await join(reach, found: { b in
+                    await carryFound(cap, fromGlobal: from, toGlobal: to, bounds: b, index: index,
+                                     shortcuts: shortcuts, cid: cid)
+                }) {
                 case .carried:
-                    carried += 1; outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to, outcome: "carried", onScreenCheck: nil))
+                    carried += 1
+                    outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to, outcome: "carried",
+                                            onScreenCheck: check))
                 case .failed(let reason):
                     skips[reason, default: 0] += 1
                     outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to, outcome: reason.rawValue,
-                                            onScreenCheck: nil))
-                case .notOnScreen(let raised):
+                                            onScreenCheck: check))
+                case .notOnScreen:
                     skips[.notOnScreen, default: 0] += 1
                     outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to,
-                                            outcome: CarrySkip.notOnScreen.rawValue,
-                                            onScreenCheck: raised ? .missedWithElement : .missedNoElement))
+                                            outcome: CarrySkip.notOnScreen.rawValue, onScreenCheck: check))
                 case .aborted(let reason):
                     skips[reason, default: 0] += 1
                     aborted = true; abortedAfter = carried
                     outcomes.append(Outcome(cap: cap, fromGlobal: from, toGlobal: to, outcome: reason.rawValue,
-                                            onScreenCheck: nil))
+                                            onScreenCheck: check))
                 }
             }
         }
@@ -573,9 +637,12 @@ public enum Carry {
                 DebugTrace.log(o.traceLine)
             }
         }
-        return CarryResult(plannedCarries: total, carried: carried, skips: skips, aborted: aborted,
-                           abortedAfter: abortedAfter, outcomes: outcomes, dryRun: !apply,
-                           readFailed: false, navigationDead: false)
+        var result = CarryResult(plannedCarries: total, carried: carried, skips: skips, aborted: aborted,
+                                 abortedAfter: abortedAfter, outcomes: outcomes, dryRun: !apply,
+                                 readFailed: false, navigationDead: false)
+        result.seenReal = seenReal
+        if apply && DebugTrace.enabled { DebugTrace.log(result.summaryTraceLine) }   // #keeps-36.2
+        return result
     }
 
     // MARK: - One window's carry (navigate → grab → carry → verify → place)
@@ -591,9 +658,19 @@ public enum Carry {
         case notOnScreen(raised: Bool)
     }
 
+    /// #keeps-36.2: the sweep's join of a leg's two halves. `notOnScreen` is built only from `Reach.missed`, and the
+    /// second half runs only on `.found` — so the leg's tag (`onScreenCheck(reach)`) and its outcome share one source.
+    private static func join(_ reach: Reach, found: (CGRect) async -> CarryOutcome) async -> CarryOutcome {
+        switch reach {
+        case .notReached(let reason): return .failed(reason)
+        case .missed(let raised): return .notOnScreen(raised: raised)
+        case .found(let bounds): return await found(bounds)
+        }
+    }
+
     /// The hold-leg's result, deliberately NOT `CarryOutcome`. This step proves the VIEW reached the target
     /// desktop with the window held — it says nothing about the frame, and it is consumed mid-function by
-    /// `executeCarry` rather than returned to the sweep. Until the fold both shared `.carried`, one case
+    /// `carryFound` rather than returned to the sweep. Until the fold both shared `.carried`, one case
     /// meaning "the Space switch worked" in one function and "the window is verified home" in three others.
     private enum StepOutcome { case switched, failed(CarrySkip), aborted(CarrySkip) }
     private static let driftThreshold: CGFloat = 12   // px a parked cursor may wander before we call it real input
@@ -602,19 +679,27 @@ public enum Carry {
     /// that — a background-Space window is unreachable by AX, which is why it was deferred here in the first
     /// place. So: navigate the VIEW to that desktop (making it reachable), raise, place. Deliberately NOT a
     /// carry — no grab, no Space switch, and no membership verification, because the Space never changes.
-    private static func executePlaceOnly(_ cap: CapturedWindow, onGlobal: Int, index: DesktopIndex,
-                                         shortcuts: Shortcuts, cid: CGSConnectionID) async -> CarryOutcome {
+    ///
+    /// #keeps-36.2: split at the on-screen check — `reachForPlace` is everything up to and including it,
+    /// `placeFound` everything after, called only with the bounds the check found.
+    private static func reachForPlace(_ cap: CapturedWindow, onGlobal: Int, index: DesktopIndex,
+                                      shortcuts: Shortcuts, cid: CGSConnectionID) async -> Reach {
         log.info("place wid=\(cap.cgWindowId) \(cap.bundleId, privacy: .public) on=\(onGlobal) (frame drift, no Space move)")
         guard await navigateView(toGlobal: onGlobal, index: index, shortcuts: shortcuts, cid: cid) else {
             log.info("place wid=\(cap.cgWindowId) FAILED nav: couldn't reach \(onGlobal)")
-            return .failed(.unreachableShortcut)
+            return .notReached(.unreachableShortcut)
         }
         let raised = raiseWindow(cap)
         try? await Task.sleep(for: .milliseconds(350))
         guard let preBounds = onScreenBounds(cap.cgWindowId) else {
             log.info("place wid=\(cap.cgWindowId) FAILED: not on screen after nav to \(onGlobal) \(Outcome.raiseEvidence(raised), privacy: .public)")
-            return .notOnScreen(raised: raised)
+            return .missed(raised: raised)
         }
+        return .found(preBounds)
+    }
+
+    private static func placeFound(_ cap: CapturedWindow, onGlobal: Int, preBounds: CGRect, index: DesktopIndex,
+                                   cid: CGSConnectionID) async -> CarryOutcome {
         guard placeFrame(cap) else {
             log.info("place wid=\(cap.cgWindowId) axPlaced=false → axPlaceFailed")
             return .failed(.axPlaceFailed)
@@ -650,8 +735,10 @@ public enum Carry {
             cap, "place wid=\(cap.cgWindowId) on=\(onGlobal) axPlaced=true membershipVerified", verb: "PLACED")
     }
 
-    private static func executeCarry(_ cap: CapturedWindow, fromGlobal: Int, toGlobal: Int,
-                                     index: DesktopIndex, shortcuts: Shortcuts, cid: CGSConnectionID) async -> CarryOutcome {
+    /// #keeps-36.2: the carry's first half — log the leg, navigate to the window's desktop, raise, and the on-screen
+    /// check. `carryFound` is the rest, called only with the bounds the check found.
+    private static func reachForCarry(_ cap: CapturedWindow, fromGlobal: Int, toGlobal: Int,
+                                      index: DesktopIndex, shortcuts: Shortcuts, cid: CGSConnectionID) async -> Reach {
         let to = index.locate(global: toGlobal), from = index.locate(global: fromGlobal)
         let sameDisplay = (to?.displayIndex == from?.displayIndex)
         log.info("carry wid=\(cap.cgWindowId) \(cap.bundleId, privacy: .public) from=\(fromGlobal)(disp \(from?.displayIndex ?? -1)) to=\(toGlobal)(disp \(to?.displayIndex ?? -1)) sameDisplay=\(sameDisplay)")
@@ -659,7 +746,7 @@ public enum Carry {
         // 1) grab-leg — navigate the VIEW to the window's current desktop so it's on screen + grabbable.
         guard await navigateView(toGlobal: fromGlobal, index: index, shortcuts: shortcuts, cid: cid) else {
             log.info("carry wid=\(cap.cgWindowId) FAILED grab-leg nav: couldn't reach from=\(fromGlobal)")
-            return .failed(.unreachableShortcut)
+            return .notReached(.unreachableShortcut)
         }
         // 2) bring the exact target forward, confirm its frame after navigation, then grab it. Raising first avoids
         // sending the synthetic mouse-down into an overlapping window on crowded desktops.
@@ -668,8 +755,14 @@ public enum Carry {
         guard let bounds = onScreenBounds(cap.cgWindowId) else {
             let nowIdx = from.flatMap { liveIndex($0.displayIndex, cid) } ?? -1   // did nav land where we asked?
             log.info("carry wid=\(cap.cgWindowId) FAILED grab-leg: not on screen after nav to \(fromGlobal) \(Outcome.raiseEvidence(raised), privacy: .public); disp \(from?.displayIndex ?? -1) now at perIdx \(nowIdx) (wanted \(from?.perDisplayIndex ?? -1))")
-            return .notOnScreen(raised: raised)
+            return .missed(raised: raised)
         }
+        return .found(bounds)
+    }
+
+    private static func carryFound(_ cap: CapturedWindow, fromGlobal: Int, toGlobal: Int, bounds: CGRect,
+                                   index: DesktopIndex, shortcuts: Shortcuts, cid: CGSConnectionID) async -> CarryOutcome {
+        let to = index.locate(global: toGlobal), from = index.locate(global: fromGlobal)
         log.info("carry wid=\(cap.cgWindowId) on screen at \(WindowFrame(bounds).map { "(\($0.x),\($0.y) \($0.w)×\($0.h))" } ?? "\(bounds)")")
         try? await Task.sleep(for: .milliseconds(700))   // settle the freshly-navigated desktop before grabbing
 
@@ -808,7 +901,7 @@ public enum Carry {
         // #keeps-23, third place path. The header claims membership verification gates every path; the frame
         // now does too. This one is covered deliberately rather than "because it looked similar" — the
         // repeated lesson on this codebase (#keeps-5, twice) is that a claim traced down one path of several
-        // reads as proven and isn't. Restitution is skipped as in `executePlaceOnly`, with one caveat that
+        // reads as proven and isn't. Restitution is skipped as in `placeFound`, with one caveat that
         // path doesn't carry: membership was polled BEFORE this frame read, so on `frameNotHeld` here the
         // Space is LAST-KNOWN, not known — a drift big enough to return the window to the origin display
         // would have re-homed it. The count stays honest either way (not counted carried); it's the Space
