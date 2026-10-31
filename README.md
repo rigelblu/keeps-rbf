@@ -64,9 +64,10 @@ machine, prior art (`tplobo/restore-spaces`, killed at 14.5), and a deep researc
 
 That one fact shapes the whole product: **cross-Space restore cannot be invisible.** With SIP on (we
 never disable it), moving a window to a background Space on its own display means *visibly* switching
-there while holding the window — we press its title bar, nudge it a few pixels to prove the window is in
-our hand, drive your own macOS Space-switch shortcut, then drop it; a window that doesn't move under the
-nudge is left alone and counted. Moving a window to a Space on *another* display uses a second
+there while holding the window — we press its title bar and drag it until the window follows (a few
+pixels; never more than 40) to prove it is in our hand, drive your own macOS Space-switch shortcut, then
+drop it. A window that doesn't follow is tried at the other points in its close/minimize/zoom row, and
+otherwise left where it was and counted. Moving a window to a Space on *another* display uses a second
 lever: switch that display's view to the target Space and place the window there via Accessibility —
 membership-verified after every move. Because all of this takes over the cursor and flips Spaces,
 keeps-rbf never springs it on you: the silent restore runs automatically, and when windows remain
@@ -158,6 +159,9 @@ bash scripts/keeps-relaunch-armed.sh          # relaunch the signed bundle with 
 Run that **from your own terminal**, never from an agent shell or an embedded one. macOS attributes
 Accessibility trust to the *launching* app, so keeps launched from a shell that has no AX grant comes up unable
 to read or move a single window — and it will look like a keeps bug rather than a launch problem.
+
+Every title-bar press writes a `[grab]` line — where keeps pressed, how far it dragged, how far the window
+moved — so `grep '\[grab\]' ~/Library/Logs/keeps-debug.log` answers "why didn't it move".
 
 Snapshots are written one-per-setup to `~/Library/Application Support/com.rigelblu.keeps/configs/`.
 Capture needs no special permission; window *titles* require Screen Recording (optional). **Restore**
