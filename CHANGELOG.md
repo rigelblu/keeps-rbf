@@ -3,13 +3,32 @@ title: Changelog
 ---
 
 # 🔵⋯ [Unreleased]
+
+# 🔵⋯ v0.10.0 (2026-11-09)
+*keeps tells the truth about your windows: a count that only names windows you really have, a reboot that finds your layout again, and a carry that works on macOS 27. — `#keeps-36`, with `#keeps-5`, `#keeps-15`, `#keeps-20`–`#keeps-24`, `#keeps-26`, `#keeps-30`, `#keeps-31` and `#keeps-38`, logged here for the first time*
+
+Only `#keeps-36` was released through `deliver-feat`. The other features' code was already in this build, so they're cut here too but weren't re-verified for this release.
+
+## 🟠⋯ Added
+- 2026-11-09 - keeps finds your windows again after a reboot — a saved layout is matched by app and position instead of refused, a mismatched app is refused rather than moved to a stranger's frame, and keeps can launch itself at login (feat reboot restore, #keeps-5) | a reboot no longer throws your layout away [@keeps-rbf]
+- 2026-11-09 - keeps installs from a drag-to-Applications disk image, ready to be signed and notarized once a Developer ID certificate exists, and says plainly when the image can't open on another Mac (feat install, #keeps-24) | install keeps like any Mac app [@keeps-rbf]
+
+## 🟠⋯ Improved
+- 2026-11-09 - a permission problem stays in the menu until you fix it — Accessibility off and each notification fault (never asked, denied, banners off) get their own clickable line that clears itself (feat permission indicator, #keeps-20) | you always see why keeps can't act, and what to click [@keeps-rbf]
+- 2026-10-31 - the file trace says why: `[carry:summary]`, `[carry:notOffered]`, `[skip:notOffered live=…]`, `[offer:back]`, `[carry:frameMiss]`, and the usable height on the restore and carry headers (#keeps-36) | a surprising verdict is explainable from the trace alone [@keeps-rbf]
+
 ## 🟠⋯ Fixed
+- 2026-11-09 - on macOS 27, Restore carries windows home to their desktops again, and Restore and Save no longer crash keeps when macOS lists a window with no real position (fix macOS 27, #keeps-38) | keeps works on macOS 27 instead of closing itself after a Restore [@keeps-rbf]
+- 2026-11-09 - a display that comes back at a different position in your arrangement keeps its windows at their saved spots (fix display position, #keeps-15) | rearranging displays doesn't scatter your windows [@keeps-rbf]
+- 2026-11-09 - after a reboot, keeps never tells a window already home to move, never pairs a real window with an app's status strip, and the package script stops before building when the signing certificate is missing (fix cold start, #keeps-31) | a reboot leaves home windows alone, and a build never drops your Accessibility grant [@keeps-rbf]
+- 2026-11-09 - quitting and relaunching an app mid-session no longer leaves its window out of the restore (fix relaunch, #keeps-30) | a relaunched app's window still comes back [@keeps-rbf]
+- 2026-11-09 - after a reboot, a window that came back on the wrong desktop of the same display gets carried home, including apps that draw their own titlebar (fix same-display carry, #keeps-26) | Zed and similar apps come home after a reboot too [@keeps-rbf]
+- 2026-11-09 - keeps counts a window as brought back only after its frame reads back and holds twice in a row (fix count honesty, #keeps-23) | "2 windows brought back" means two, not one [@keeps-rbf]
+- 2026-11-09 - a window already on its desktop but the wrong size now comes home too, and the offer and verdict say what's wrong instead of where windows are (fix wrong size, #keeps-22) | a resized window gets fixed, not just counted [@keeps-rbf]
+- 2026-11-09 - a stopped carry says "1 window", not "1 windows" (fix copy, #keeps-21) | the verdict reads right for a single window [@keeps-rbf]
 - 2026-10-31 - the done notification no longer counts a window keeps reached but couldn't see and whose app gave it nothing to reach — such a quiet miss stays out of the verdict (fix count honesty, #keeps-36.1) | a status strip saved as a window no longer turns "3 windows brought back" into "3 of 5" [@keeps-rbf]
 - 2026-10-31 - keeps stops offering a window it failed to find twice in a row with no Accessibility element, until a Restore or offer tap sees it or keeps relaunches; a stopped carry's badge drops the windows that run stopped offering (fix stop offering, #keeps-36.2) | no more desktop trips and "Couldn't bring the window back" for windows you never had [@keeps-rbf]
 - 2026-10-31 - a window the screen caps below its saved height — the Dock's reserved strip — counts as home at the height the screen allows, in Restore, the carry's plan and its frame check (fix capped height, #keeps-36.3) | a window that came home no longer reads "Couldn't bring the window back", and keeps doesn't re-place it every Restore; when the Dock hides, its full height comes back [@keeps-rbf]
-
-## 🟠⋯ Improved
-- 2026-10-31 - the file trace says why: `[carry:summary]`, `[carry:notOffered]`, `[skip:notOffered live=…]`, `[offer:back]`, `[carry:frameMiss]`, and the usable height on the restore and carry headers (#keeps-36) | a surprising verdict is explainable from the trace alone [@keeps-rbf]
 
 # 🔵⋯ v0.9.0 (2026-07-07)
 *A running carry is legible end to end: the menu-bar item animates with live progress while keeps works, and a notification delivers the honest verdict the moment it's done — you never open the menu to find out what happened. — `#keeps-19`*
